@@ -1,0 +1,25 @@
+# CI overlay: no published data-tier ports, no restart loop, ephemeral storage.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait
+
+services:
+  postgres:
+    ports: !override []
+    volumes: !override []
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    ports: !override []
+    volumes: !override []
+    command: ["redis-server", "--save", ""]
+
+  broker:
+    environment:
+      CAMPUSID_ENVIRONMENT: ci
+      CAMPUSID_LOG_FORMAT: json
+    restart: "no"
+
+  tests:
+    environment:
+      CAMPUSID_ENVIRONMENT: ci

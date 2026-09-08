@@ -1,0 +1,75 @@
+[project]
+name = "campusid"
+version = "0.1.0"
+description = "SAML/OIDC identity broker with SCIM 2.0 provisioning and campus federation"
+requires-python = ">=3.12"
+
+# No build-system section: the application is run from source inside the
+# container (WORKDIR /app on PYTHONPATH), not installed as a distribution.
+# This file carries tool configuration only.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["campusid", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "S",    # flake8-bandit
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "S101",  # assert: used deliberately in tests and internal invariants
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]      # hardcoded test credentials are fixtures
+"migrations/**" = ["E501"]          # generated revision identifiers
+
+[tool.ruff.lint.isort]
+known-first-party = ["campusid"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["campusid", "tests"]
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["alembic.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The application runs from source rather than as an installed distribution,
+# so the repo root has to be on sys.path for `import campusid` to resolve.
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "integration: requires live Postgres/Redis/LDAP/IdP containers",
+    "e2e: requires a browser and the full compose stack",
+]
+
+[tool.coverage.run]
+source = ["campusid"]
+branch = true
+omit = ["campusid/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

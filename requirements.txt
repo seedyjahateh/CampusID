@@ -1,0 +1,11 @@
+# Runtime dependencies. Pinned to exact versions for reproducible builds.
+# Hash pinning (NFR-SEC-08) lands with the dependency-audit work in M5.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+redis==5.2.1
+structlog==24.4.0

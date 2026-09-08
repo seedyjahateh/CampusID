@@ -1,0 +1,109 @@
+# CampusID development stack.
+#
+# Week 0 brings up the data tier and an empty broker. Later milestones add
+# profiles: `federation` (Keycloak, SimpleSAMLphp), `directory` (OpenLDAP),
+# `apps` (CampusPortal, LMS/analytics simulators), `observability`.
+#
+#   cp .env.example .env
+#   docker compose up -d --wait
+#   curl http://localhost:8000/healthz
+
+name: campusid
+
+x-broker-env: &broker-env
+  CAMPUSID_ENVIRONMENT: ${CAMPUSID_ENVIRONMENT:-dev}
+  CAMPUSID_BASE_URL: ${CAMPUSID_BASE_URL:-http://localhost:8000}
+  CAMPUSID_DATABASE_URL: >-
+    postgresql+asyncpg://${POSTGRES_USER:-campusid}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-campusid}
+  CAMPUSID_REDIS_URL: redis://redis:6379/0
+  CAMPUSID_LOG_LEVEL: ${CAMPUSID_LOG_LEVEL:-INFO}
+  CAMPUSID_LOG_FORMAT: ${CAMPUSID_LOG_FORMAT:-json}
+  TZ: UTC
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-campusid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-campusid}
+      # Deterministic collation so ordering is identical across machines.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: UTC
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-campusid} -d ${POSTGRES_DB:-campusid}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks: [internal]
+    # Published for local psql access only; the CI overlay removes this.
+    # Off-standard default so a host that already runs Postgres still comes up.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [internal]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-56379}:6379"
+
+  broker:
+    build:
+      context: .
+      target: runtime
+    image: campusid/broker:dev
+    environment: *broker-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BROKER_PORT:-8000}:8000"
+    networks: [internal]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Test runner: the dev image, which adds the test toolchain. Not started by
+  # `docker compose up` — invoke it explicitly:
+  #
+  #   docker compose run --rm tests
+  #   docker compose run --rm tests pytest tests/unit -v
+  tests:
+    profiles: [tools]
+    build:
+      context: .
+      target: dev
+    image: campusid/broker:test
+    environment: *broker-env
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks: [internal]
+    entrypoint: ["pytest"]
+    command: ["tests/integration", "-v"]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
