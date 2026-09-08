@@ -101,6 +101,7 @@ markers = [
     "integration: requires live Postgres/Redis/LDAP/IdP containers",
     "e2e: requires a browser and the full compose stack",
     "security: negative test - asserts a specific rejection reason code",
+    "federation: requires the federation profile (Keycloak) to be up",
 ]
 
 [tool.coverage.run]

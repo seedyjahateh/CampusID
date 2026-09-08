@@ -19,3 +19,5 @@ cryptography==50.0.1
 # Required by FastAPI's Form(...) — how POST /saml/acs reads SAMLResponse.
 # Its absence fails at route-definition time, not request time.
 python-multipart==0.0.32
+# Fetching peer metadata: by federation-init now, by the refresh job in M2.
+httpx==0.28.1

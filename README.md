@@ -9,8 +9,9 @@ OIDC provider, provisions and deprovisions accounts from a mock SIS over SCIM
 RBAC/ABAC with step-up MFA — logging every authentication, authorization, and
 attribute-release decision.
 
-**Status: M0 (Foundations) complete.** The data tier and an empty broker come up
-under `docker compose`; protocol work starts at M1. Full specification:
+**Status: M1a complete.** A browser can sign in against a real Keycloak IdP and
+land in a broker session, through a validation gate that rejects expired,
+misaddressed, replayed and signature-wrapped assertions. Full specification:
 [`docs/PRD.md`](docs/PRD.md).
 
 ## Quickstart
@@ -20,15 +21,30 @@ git clone <repo> && cd CampusID
 cp .env.example .env
 docker compose up -d --wait
 
-curl http://localhost:8000/healthz    # liveness  -> 200
-curl http://localhost:8000/readyz     # readiness -> 200 once Postgres + Redis answer
+curl http://localhost:8000/healthz        # liveness  -> 200
+curl http://localhost:8000/saml/metadata  # our SP descriptor
 ```
 
-Or run the acceptance check directly:
+### With a real IdP
 
 ```sh
-./scripts/smoke.sh
+docker compose --profile federation up -d
+docker compose --profile federation run --rm federation-init
 ```
+
+`federation-init` performs the metadata exchange in both directions: it hands
+the broker's descriptor to Keycloak (creating the SAML client, pinning the
+attributes Keycloak gets wrong by default, and installing the eduPerson
+mappers) and registers Keycloak's descriptor with the broker.
+
+Then open <http://localhost:8000/saml/sso> and sign in as `sam.obrien` /
+`campus-dev-password`. You land on `/me` with the released attributes.
+
+The exchange is automated rather than pre-baked because the Keycloak client
+must carry the broker's signing certificate, and the broker generates its
+keypair on first start — so the certificate does not exist until it has run.
+The alternative, a committed development key, is not something a project about
+credential handling should ship.
 
 | Service | Address | Purpose |
 |---|---|---|
@@ -56,7 +72,8 @@ that reproduces the quickstart on a clean runner.
 | Milestone | Scope | Status |
 |---|---|---|
 | M0 | Repo scaffold, data tier, migrations, CI | ✅ Complete |
-| M1 | Keycloak + SimpleSAMLphp IdPs, SAML SP with the full assertion validation gate, discovery | Next |
+| M1a | Keycloak IdP, SAML SP with the full assertion validation gate, federation registry, sessions | ✅ Complete |
+| M1b | SimpleSAMLphp second IdP, discovery service, encrypted assertions | Next |
 | M2 | Attribute release policy, OIDC provider, dual-protocol sample app | |
 | M3 | SCIM 2.0 provisioning, joiner/mover/leaver lifecycle | |
 | M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA | |

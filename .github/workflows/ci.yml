@@ -115,3 +115,50 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.ci.yml \
             down -v --remove-orphans
+
+  federation:
+    name: SSO against a real IdP
+    runs-on: ubuntu-latest
+    # Separate from compose-smoke so the fast job stays fast: Keycloak costs
+    # ~40s of startup that most changes do not need.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare environment file
+        run: cp .env.example .env
+
+      - name: Bring up the broker
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile federation up -d --build --wait --wait-timeout 300 \
+            postgres redis broker
+
+      - name: Bring up Keycloak
+        # No `--wait`: the Keycloak image is distroless, so it carries no shell
+        # probe a compose healthcheck could use. federation-init polls for
+        # readiness itself and fails loudly after 2 minutes.
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile federation up -d keycloak
+
+      - name: Exchange metadata
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile federation run --rm --build federation-init
+
+      - name: Integration tests, including a real Keycloak login
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            run --rm tests tests/integration -v
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile federation logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile federation down -v --remove-orphans

@@ -5,7 +5,12 @@ FROM python:3.12-slim AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # The app runs from source rather than as an installed distribution, so
+    # /app must be importable however a process is started. Without this, a
+    # script under scripts/ gets its own directory on sys.path and not the
+    # package root.
+    PYTHONPATH=/app
 
 WORKDIR /app
 

@@ -1,0 +1,95 @@
+{
+  "realm": "campus",
+  "displayName": "Campus IdP",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+
+  "users": [
+    {
+      "username": "sam.obrien",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Samira",
+      "lastName": "O'Brien-Ngũgĩ",
+      "email": "sam.obrien@campus.edu",
+      "credentials": [
+        { "type": "password", "value": "campus-dev-password", "temporary": false }
+      ],
+      "attributes": {
+        "eduPersonPrincipalName": ["sam.obrien@campus.edu"],
+        "eduPersonScopedAffiliation": ["student@campus.edu", "member@campus.edu"],
+        "eduPersonPrimaryAffiliation": ["student"],
+        "eduPersonEntitlement": ["urn:mace:campus.edu:entitlement:lms:access"],
+        "displayName": ["Samira O'Brien-Ngũgĩ"],
+        "ou": ["CS"]
+      }
+    },
+    {
+      "username": "dana.wu",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Dana",
+      "lastName": "Wu",
+      "email": "dana.wu@campus.edu",
+      "credentials": [
+        { "type": "password", "value": "campus-dev-password", "temporary": false }
+      ],
+      "attributes": {
+        "eduPersonPrincipalName": ["dana.wu@campus.edu"],
+        "eduPersonScopedAffiliation": [
+          "staff@campus.edu",
+          "student@campus.edu",
+          "member@campus.edu"
+        ],
+        "eduPersonPrimaryAffiliation": ["staff"],
+        "eduPersonEntitlement": [
+          "urn:mace:campus.edu:entitlement:lms:access",
+          "urn:mace:campus.edu:entitlement:library:eresources"
+        ],
+        "displayName": ["Dana Wu"],
+        "ou": ["LIB"]
+      }
+    },
+    {
+      "username": "marcus.reed",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Marcus",
+      "lastName": "Reed",
+      "email": "marcus.reed@campus.edu",
+      "credentials": [
+        { "type": "password", "value": "campus-dev-password", "temporary": false }
+      ],
+      "attributes": {
+        "eduPersonPrincipalName": ["marcus.reed@campus.edu"],
+        "eduPersonScopedAffiliation": ["student@campus.edu", "member@campus.edu"],
+        "eduPersonPrimaryAffiliation": ["student"],
+        "displayName": ["Marcus Reed"],
+        "ou": ["HIST"],
+        "ferpaDirectorySuppressed": ["true"]
+      }
+    },
+    {
+      "username": "terminated.tim",
+      "enabled": false,
+      "emailVerified": true,
+      "firstName": "Tim",
+      "lastName": "Turner",
+      "email": "tim.turner@campus.edu",
+      "credentials": [
+        { "type": "password", "value": "campus-dev-password", "temporary": false }
+      ],
+      "attributes": {
+        "eduPersonPrincipalName": ["tim.turner@campus.edu"],
+        "eduPersonScopedAffiliation": ["alum@campus.edu"],
+        "displayName": ["Tim Turner"]
+      }
+    }
+  ]
+}

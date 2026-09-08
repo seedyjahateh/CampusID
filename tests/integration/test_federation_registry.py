@@ -11,7 +11,7 @@ import datetime as dt
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from campusid.config import get_settings
@@ -36,17 +36,41 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 @pytest.fixture
 async def sessions(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Undo only what the test registered.
+
+    Deliberately *not* a truncate. The same database holds the Keycloak
+    registration that `federation-init` created, and clearing the table
+    wholesale left the federation tests unable to resolve their IdP — passing
+    in isolation and failing in the suite, which is the worst way for a test to
+    be wrong. Snapshotting first means the cleanup is precise without depending
+    on how entities happen to be named.
+    """
     factory = create_session_factory(engine)
+
+    async with factory() as session:
+        pre_existing = set(await session.scalars(select(FederationEntity.entity_id)))
+
     yield factory
-    # Each test owns the table; leaving rows behind would make the next run's
-    # upsert assertions depend on execution order.
+
     async with factory() as session, session.begin():
-        await session.execute(delete(FederationEntity))
+        await session.execute(
+            delete(FederationEntity).where(FederationEntity.entity_id.not_in(pre_existing or {""}))
+        )
 
 
 @pytest.fixture
 def registry(sessions: async_sessionmaker[AsyncSession]) -> FederationRegistry:
     return FederationRegistry(sessions)
+
+
+async def _registered_ids(registry: FederationRegistry) -> list[str]:
+    """Entity ids currently registered.
+
+    Assertions are made against membership rather than the whole list: the
+    federation profile registers Keycloak into the same table, so a test that
+    expected to be alone would pass by itself and fail in the suite.
+    """
+    return [entity.entity_id for entity in await registry.list_idps()]
 
 
 async def test_registering_an_idp_makes_it_resolvable(
@@ -76,7 +100,7 @@ async def test_invalid_metadata_is_refused_at_registration(
         await registry.register_idp(idp.metadata(include_key=False))
 
     assert exc.value.reason is ReasonCode.METADATA_INVALID
-    assert await registry.list_idps() == []
+    assert idp.entity_id not in await _registered_ids(registry)
 
 
 async def test_re_registering_replaces_rather_than_duplicates(
@@ -89,8 +113,8 @@ async def test_re_registering_replaces_rather_than_duplicates(
     await registry.register_idp(idp.metadata())
     await registry.register_idp(rolled.metadata())
 
-    entities = await registry.list_idps()
-    assert len(entities) == 1
+    registered = await _registered_ids(registry)
+    assert list(registered).count(idp.entity_id) == 1
 
     trusted = await registry.resolve_trusted_idp(idp.entity_id)
     assert trusted is not None
@@ -107,7 +131,7 @@ async def test_a_disabled_entity_stops_being_trusted(
     await registry.set_enabled(idp.entity_id, False)
 
     assert await registry.resolve_trusted_idp(idp.entity_id) is None
-    assert [entity.entity_id for entity in await registry.list_idps()] == [idp.entity_id]
+    assert idp.entity_id in await _registered_ids(registry)  # listed, just not trusted
 
 
 async def test_re_enabling_restores_trust(registry: FederationRegistry, idp: ForgedIdP) -> None:
@@ -154,10 +178,12 @@ async def test_the_stored_document_is_kept_verbatim(
     document = idp.metadata()
     await registry.register_idp(document, metadata_url="http://keycloak:8080/descriptor")
 
-    entities = await registry.list_idps()
+    stored = next(
+        entity for entity in await registry.list_idps() if entity.entity_id == idp.entity_id
+    )
 
-    assert entities[0].metadata_document.encode("utf-8") == document
-    assert entities[0].metadata_url == "http://keycloak:8080/descriptor"
+    assert stored.metadata_document.encode("utf-8") == document
+    assert stored.metadata_url == "http://keycloak:8080/descriptor"
 
 
 async def test_the_gate_authenticates_against_a_registered_idp(

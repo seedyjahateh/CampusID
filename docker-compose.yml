@@ -88,6 +88,59 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  # --- federation profile -------------------------------------------------
+  # Behind a profile so `docker compose up` stays fast: Keycloak takes ~40s to
+  # start and most work does not need it.
+  #
+  #   docker compose --profile federation up -d
+  #   docker compose --profile federation run --rm federation-init
+  keycloak:
+    profiles: [federation]
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      # Keycloak generates the URLs in its SAML descriptor from this, so it
+      # must be what the *browser* can reach. The broker fetches that same
+      # descriptor over the internal network and still gets browser-usable
+      # URLs, which is what makes the whole arrangement work without a hosts
+      # file entry. An entityID is an identifier, not a fetch address.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://localhost:18080}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      TZ: UTC
+    volumes:
+      - ./docker/keycloak/realm-campus.json:/opt/keycloak/data/import/realm-campus.json:ro
+    ports:
+      - "${KEYCLOAK_PORT:-18080}:8080"
+    networks: [internal]
+    # No container healthcheck: the Keycloak image is distroless, with no curl
+    # and no bash, so a shell probe never passes and `up --wait` hangs to its
+    # timeout with nothing useful in the logs. federation-init polls instead.
+
+  federation-init:
+    profiles: [federation]
+    image: campusid/broker:test
+    build:
+      context: .
+      target: dev
+    environment:
+      <<: *broker-env
+      FEDERATION_BROKER_URL: http://broker:8000
+      FEDERATION_KEYCLOAK_URL: http://keycloak:8080
+      FEDERATION_KEYCLOAK_REALM: campus
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks: [internal]
+    restart: "no"
+    entrypoint: ["python"]
+    command: ["scripts/federation_init.py"]
+
   # Test runner: the dev image, which adds the test toolchain. Not started by
   # `docker compose up` — invoke it explicitly:
   #
