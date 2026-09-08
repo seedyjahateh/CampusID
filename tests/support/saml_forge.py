@@ -33,6 +33,7 @@ from lxml import etree
 from signxml import DigestAlgorithm, SignatureMethod, XMLSigner
 
 from campusid.saml.namespaces import (
+    BEARER_CONFIRMATION_METHOD,
     NS,
     Q_ASSERTION,
     Q_ISSUER,
@@ -122,6 +123,9 @@ class ForgedIdP:
         # subject
         name_id: str = "sam.obrien@campus.edu",
         name_id_format: str = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+        confirmation_method: str = BEARER_CONFIRMATION_METHOD,
+        include_subject: bool = True,
+        include_conditions: bool = True,
         # validity window
         now: dt.datetime | None = None,
         not_before: dt.datetime | None = None,
@@ -133,6 +137,7 @@ class ForgedIdP:
         | None = "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
         session_index: str = "_session1",
         attributes: dict[str, list[str]] | None = None,
+        extra_conditions: str = "",
         # signing
         sign: SignTarget = "assertion",
         sign_with: SigningKey | None = None,
@@ -168,6 +173,9 @@ class ForgedIdP:
                 status_code=status_code,
                 name_id=name_id,
                 name_id_format=name_id_format,
+                confirmation_method=confirmation_method,
+                include_subject=include_subject,
+                include_conditions=include_conditions,
                 issue_instant=_timestamp(now),
                 not_before=_timestamp(not_before),
                 not_on_or_after=_timestamp(not_on_or_after),
@@ -176,6 +184,7 @@ class ForgedIdP:
                 authn_context=authn_context,
                 session_index=session_index,
                 attributes=attributes or {},
+                extra_conditions=extra_conditions,
             ).encode(),
             parser=_PARSER,
         )
@@ -244,6 +253,9 @@ class ForgedIdP:
         status_code: str,
         name_id: str,
         name_id_format: str,
+        confirmation_method: str,
+        include_subject: bool,
+        include_conditions: bool,
         issue_instant: str,
         not_before: str,
         not_on_or_after: str,
@@ -252,6 +264,7 @@ class ForgedIdP:
         authn_context: str | None,
         session_index: str,
         attributes: dict[str, list[str]],
+        extra_conditions: str = "",
     ) -> str:
         in_response_to_attr = (
             f' InResponseTo="{in_response_to}"' if in_response_to is not None else ""
@@ -284,6 +297,28 @@ class ForgedIdP:
             )
             attribute_statement = f"<saml:AttributeStatement>{rendered}</saml:AttributeStatement>"
 
+        subject = (
+            f"<saml:Subject>"
+            f'<saml:NameID Format="{name_id_format}">{name_id}</saml:NameID>'
+            f'<saml:SubjectConfirmation Method="{confirmation_method}">'
+            f"<saml:SubjectConfirmationData{confirmation_in_response_to}"
+            f' NotOnOrAfter="{subject_not_on_or_after}" Recipient="{recipient}"/>'
+            f"</saml:SubjectConfirmation>"
+            f"</saml:Subject>"
+            if include_subject
+            else ""
+        )
+        conditions = (
+            f'<saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">'
+            f"<saml:AudienceRestriction>"
+            f"<saml:Audience>{audience}</saml:Audience>"
+            f"</saml:AudienceRestriction>"
+            f"{extra_conditions}"
+            f"</saml:Conditions>"
+            if include_conditions
+            else ""
+        )
+
         return (
             f'<samlp:Response xmlns:samlp="{SAMLP}" xmlns:saml="{SAML}"'
             f' ID="{response_id}" Version="2.0" IssueInstant="{issue_instant}"'
@@ -293,18 +328,8 @@ class ForgedIdP:
             f'<saml:Assertion ID="{assertion_id}" Version="2.0"'
             f' IssueInstant="{issue_instant}">'
             f"<saml:Issuer>{assertion_issuer}</saml:Issuer>"
-            f"<saml:Subject>"
-            f'<saml:NameID Format="{name_id_format}">{name_id}</saml:NameID>'
-            f'<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">'
-            f"<saml:SubjectConfirmationData{confirmation_in_response_to}"
-            f' NotOnOrAfter="{subject_not_on_or_after}" Recipient="{recipient}"/>'
-            f"</saml:SubjectConfirmation>"
-            f"</saml:Subject>"
-            f'<saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">'
-            f"<saml:AudienceRestriction>"
-            f"<saml:Audience>{audience}</saml:Audience>"
-            f"</saml:AudienceRestriction>"
-            f"</saml:Conditions>"
+            f"{subject}"
+            f"{conditions}"
             f"{authn_statement}"
             f"{attribute_statement}"
             f"</saml:Assertion>"

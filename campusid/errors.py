@@ -71,12 +71,21 @@ NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset(
         # now so the audit vocabulary is stable, and exempted here so the
         # completeness meta-test stays honest rather than being weakened.
         #
-        # This set MUST be empty by the end of M2.
+        # This entry MUST be gone by the end of M2.
         ReasonCode.DECRYPTION_FAILED,
         ReasonCode.UNSUPPORTED_ENCRYPTION_ALGORITHM,
+        # Raised when the request-binding cookie does not match the RelayState
+        # record — the login-CSRF defence. Lands with the session cookies later
+        # in M1; declared now because the ACS already reasons about RelayState.
+        ReasonCode.REQUEST_BINDING_INVALID,
     }
 )
-"""Codes with no reachable code path yet, exempt from the completeness test."""
+"""Codes with no reachable code path yet, exempt from the completeness test.
+
+An escape hatch, so it is enumerated in `test_negative_suite_completeness.py`
+and every entry names the milestone that removes it. Adding a code here to
+silence a failing build, rather than to record deliberately deferred work,
+defeats the purpose of the check."""
 
 
 class BrokerError(Exception):

@@ -8,6 +8,7 @@ that need live dependencies carry the ``integration`` marker.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import FastAPI
@@ -15,7 +16,10 @@ from httpx import ASGITransport, AsyncClient
 
 from campusid.app import create_app
 from campusid.config import Environment, Settings
+from campusid.saml.gate import AssertionGate, GatePolicy, TrustedIdP
+from campusid.saml.stores import OutstandingRequest
 from tests.support.saml_forge import ForgedIdP
+from tests.support.stores import InMemoryReplayCache, InMemoryRequestStore
 
 
 @pytest.fixture(scope="session")
@@ -32,6 +36,63 @@ def other_idp() -> ForgedIdP:
     failure is a *registered* peer signing for someone else's entityID.
     """
     return ForgedIdP(entity_id="https://other-idp.test/saml")
+
+
+@pytest.fixture
+def replay_cache() -> InMemoryReplayCache:
+    return InMemoryReplayCache()
+
+
+@pytest.fixture
+def request_store(idp: ForgedIdP) -> InMemoryRequestStore:
+    """Seeded with the request the forge answers by default."""
+    store = InMemoryRequestStore()
+    store.requests["_request1"] = OutstandingRequest(
+        request_id="_request1",
+        idp_entity_id=idp.entity_id,
+        relay_state="relay-token",
+        created_at=datetime(2026, 9, 8, 12, 0, tzinfo=UTC),
+    )
+    return store
+
+
+@pytest.fixture
+def gate_policy(idp: ForgedIdP) -> GatePolicy:
+    return GatePolicy(audience=idp.default_audience, destination=idp.default_destination)
+
+
+@pytest.fixture
+def trusted_idps(idp: ForgedIdP, other_idp: ForgedIdP) -> dict[str, TrustedIdP]:
+    """Both forge IdPs registered, each pinned to its own certificate.
+
+    `other_idp` is registered deliberately: the interesting failure is not an
+    unknown stranger but a *trusted peer* signing for someone else's entityID.
+    """
+    return {
+        idp.entity_id: TrustedIdP(
+            entity_id=idp.entity_id,
+            signing_certificates=(idp.key.certificate_pem,),
+        ),
+        other_idp.entity_id: TrustedIdP(
+            entity_id=other_idp.entity_id,
+            signing_certificates=(other_idp.key.certificate_pem,),
+        ),
+    }
+
+
+@pytest.fixture
+def gate(
+    gate_policy: GatePolicy,
+    trusted_idps: dict[str, TrustedIdP],
+    replay_cache: InMemoryReplayCache,
+    request_store: InMemoryRequestStore,
+) -> AssertionGate:
+    return AssertionGate(
+        policy=gate_policy,
+        resolve_idp=trusted_idps.get,
+        replay_cache=replay_cache,
+        request_store=request_store,
+    )
 
 
 @pytest.fixture

@@ -60,9 +60,7 @@ def test_signature_sits_after_issuer_and_still_verifies(idp: ForgedIdP) -> None:
 
 
 def test_attributes_are_rendered(idp: ForgedIdP) -> None:
-    document = idp.response(
-        attributes={"urn:oid:1.3.6.1.4.1.5923.1.1.1.9": ["student@campus.edu"]}
-    )
+    document = idp.response(attributes={"urn:oid:1.3.6.1.4.1.5923.1.1.1.9": ["student@campus.edu"]})
 
     assert b"student@campus.edu" in document
     assert b"attrname-format:uri" in document
