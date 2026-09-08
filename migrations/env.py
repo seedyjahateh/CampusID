@@ -20,6 +20,7 @@ from alembic import context
 from sqlalchemy import Connection, pool, text
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import campusid.federation.models  # noqa: F401 - registers tables on `metadata`
 from campusid.config import get_settings
 from campusid.models import metadata
 

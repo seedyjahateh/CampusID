@@ -40,7 +40,7 @@ matters.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal, overload
@@ -102,6 +102,15 @@ class TrustedIdP:
     allow_unsolicited: bool = False
 
 
+IdPResolver = Callable[[str], Awaitable["TrustedIdP | None"]]
+"""Resolves an `Issuer` to a trusted entity.
+
+Asynchronous because the federation registry lives in Postgres: FR-FED-02
+requires an IdP to become usable without a restart, which rules out holding the
+set in immutable settings.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class GatePolicy:
     """What this broker will accept."""
@@ -138,7 +147,7 @@ class AssertionGate:
     def __init__(
         self,
         policy: GatePolicy,
-        resolve_idp: Callable[[str], TrustedIdP | None],
+        resolve_idp: IdPResolver,
         replay_cache: ReplayCache,
         request_store: RequestStore,
         now: Callable[[], datetime] = utcnow,
@@ -154,7 +163,7 @@ class AssertionGate:
         root = parse_saml(document)  # 1. hardened parse
         assert_no_wrapping(root)  # 2. structural integrity
         self._check_status(root)  # 3. protocol status
-        idp = self._resolve_issuer(root)  # 4. issuer -> trusted entity
+        idp = await self._resolve_issuer(root)  # 4. issuer -> trusted entity
 
         # 5-7. algorithms, reference binding, signature.
         assertion = self._verify(root, idp)
@@ -196,7 +205,7 @@ class AssertionGate:
 
     # --- 4. issuer ---------------------------------------------------------
 
-    def _resolve_issuer(self, root: etree._Element) -> TrustedIdP:
+    async def _resolve_issuer(self, root: etree._Element) -> TrustedIdP:
         """Resolve the issuing IdP, and require both issuers to agree.
 
         Binding the certificate to the `Issuer` is what stops one registered
@@ -218,7 +227,7 @@ class AssertionGate:
         if not issuer:
             raise SamlRejected(ReasonCode.UNKNOWN_ISSUER, "no Issuer element")
 
-        idp = self._resolve_idp(issuer)
+        idp = await self._resolve_idp(issuer)
         if idp is None:
             raise SamlRejected(ReasonCode.UNKNOWN_ISSUER, f"issuer {issuer!r} is not registered")
         return idp

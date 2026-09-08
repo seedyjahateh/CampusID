@@ -16,7 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from campusid.app import create_app
 from campusid.config import Environment, Settings
-from campusid.saml.gate import AssertionGate, GatePolicy, TrustedIdP
+from campusid.saml.gate import AssertionGate, GatePolicy, IdPResolver, TrustedIdP
 from campusid.saml.stores import OutstandingRequest
 from tests.support.saml_forge import ForgedIdP
 from tests.support.stores import InMemoryReplayCache, InMemoryRequestStore
@@ -81,15 +81,25 @@ def trusted_idps(idp: ForgedIdP, other_idp: ForgedIdP) -> dict[str, TrustedIdP]:
 
 
 @pytest.fixture
+def resolve_idp(trusted_idps: dict[str, TrustedIdP]) -> IdPResolver:
+    """The gate's resolver is async because the real one queries Postgres."""
+
+    async def resolve(entity_id: str) -> TrustedIdP | None:
+        return trusted_idps.get(entity_id)
+
+    return resolve
+
+
+@pytest.fixture
 def gate(
     gate_policy: GatePolicy,
-    trusted_idps: dict[str, TrustedIdP],
+    resolve_idp: IdPResolver,
     replay_cache: InMemoryReplayCache,
     request_store: InMemoryRequestStore,
 ) -> AssertionGate:
     return AssertionGate(
         policy=gate_policy,
-        resolve_idp=trusted_idps.get,
+        resolve_idp=resolve_idp,
         replay_cache=replay_cache,
         request_store=request_store,
     )

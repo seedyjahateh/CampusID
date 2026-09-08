@@ -38,10 +38,15 @@ def _gate(
     trusted = trusted or TrustedIdP(
         entity_id=idp.entity_id, signing_certificates=(idp.key.certificate_pem,)
     )
+    registered = {idp.entity_id: trusted}
+
+    async def resolve(entity_id: str) -> TrustedIdP | None:
+        return registered.get(entity_id)
+
     return AssertionGate(
         policy=policy
         or GatePolicy(audience=idp.default_audience, destination=idp.default_destination),
-        resolve_idp={idp.entity_id: trusted}.get,
+        resolve_idp=resolve,
         replay_cache=InMemoryReplayCache(),
         request_store=request_store or InMemoryRequestStore(),
     )
