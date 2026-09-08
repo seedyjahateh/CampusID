@@ -9,3 +9,13 @@ asyncpg==0.30.0
 alembic==1.14.0
 redis==5.2.1
 structlog==24.4.0
+
+# --- SAML 2.0 (M1) ---------------------------------------------------------
+# No libxmlsec1: signxml is pure lxml + cryptography, so the image stays
+# multi-arch and the build has no native compilation step. See ADR-003.
+lxml==6.1.3
+signxml==5.1.0
+cryptography==50.0.1
+# Required by FastAPI's Form(...) — how POST /saml/acs reads SAMLResponse.
+# Its absence fails at route-definition time, not request time.
+python-multipart==0.0.32

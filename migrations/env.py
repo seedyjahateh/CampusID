@@ -76,9 +76,7 @@ async def run_migrations_online() -> None:
         # its transaction open would make Alembic's own begin_transaction() a
         # nested no-op, so the DDL would be rolled back when the connection
         # closed — while still logging "Running upgrade" as if it had applied.
-        await connection.execute(
-            text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK_ID}
-        )
+        await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK_ID})
         await connection.commit()
         try:
             await connection.run_sync(do_run_migrations)

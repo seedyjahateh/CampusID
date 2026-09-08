@@ -45,14 +45,25 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      # tests/security runs here, not in the container job: the validation gate
+      # is built against injectable stores precisely so the negative suite needs
+      # no Postgres, no Redis and no IdP. If these ever start needing a
+      # container, that is a design regression, not a CI problem.
       - name: pytest
         run: |
-          pytest tests/unit \
+          pytest tests/unit tests/security \
             --cov=campusid \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-fail-under=85 \
             --junitxml=reports/unit.xml
+
+      - name: Coverage gate for security-critical packages (PRD 12.1)
+        run: |
+          pytest tests/unit tests/security -q \
+            --cov=campusid/saml \
+            --cov-report=term-missing \
+            --cov-fail-under=95
       - uses: actions/upload-artifact@v4
         if: always()
         with:

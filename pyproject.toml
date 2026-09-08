@@ -31,8 +31,26 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S105", "S106"]      # hardcoded test credentials are fixtures
+# S105/S106: hardcoded test credentials are fixtures.
+# S320: the negative suite exists to feed hostile XML to the parser. Refusing to
+#       let tests construct it would mean shipping the defenses untested.
+"tests/**" = ["S105", "S106", "S320"]
 "migrations/**" = ["E501"]          # generated revision identifiers
+
+# flake8-bandit flags every lxml call as unsafe-XML (S320) and warns on
+# etree usage generally. Blanket-suppressing that in a project whose whole
+# point is XML security deserves an explanation, so here it is:
+#
+# campusid/saml/parser.py is the ONLY module permitted to parse untrusted
+# XML. It does so with a parser built by hardened_parser(), which sets
+# resolve_entities=False, no_network=True, huge_tree=False, load_dtd=False
+# and remove_comments=True, then applies affirmative structural checks
+# (DOCTYPE rejection, duplicate-ID rejection, #WithComments rejection).
+# S320's advice is "use defusedxml" — defusedxml does not support the
+# c14n and XPath operations XML-DSig verification requires, and it is
+# itself in maintenance mode. The hardening is done by hand and tested
+# by tests/security/test_xml_hardening.py instead.
+"campusid/saml/parser.py" = ["S320"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["campusid"]
@@ -48,6 +66,11 @@ plugins = ["pydantic.mypy"]
 module = ["alembic.*"]
 ignore_missing_imports = true
 
+# lxml-stubs is incomplete and signxml ships no stubs at all.
+[[tool.mypy.overrides]]
+module = ["signxml.*", "fakeredis.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The application runs from source rather than as an installed distribution,
@@ -59,6 +82,7 @@ addopts = "-ra --strict-markers --strict-config"
 markers = [
     "integration: requires live Postgres/Redis/LDAP/IdP containers",
     "e2e: requires a browser and the full compose stack",
+    "security: negative test - asserts a specific rejection reason code",
 ]
 
 [tool.coverage.run]
