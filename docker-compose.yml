@@ -18,6 +18,8 @@ x-broker-env: &broker-env
   CAMPUSID_REDIS_URL: redis://redis:6379/0
   CAMPUSID_LOG_LEVEL: ${CAMPUSID_LOG_LEVEL:-INFO}
   CAMPUSID_LOG_FORMAT: ${CAMPUSID_LOG_FORMAT:-json}
+  CAMPUSID_SAML_KEY_DIR: /var/lib/campusid/saml
+  CAMPUSID_SAML_DEFAULT_IDP: ${CAMPUSID_SAML_DEFAULT_IDP:-}
   TZ: UTC
 
 services:
@@ -76,6 +78,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
+    volumes:
+      # The SP keypair, generated on first start. A named volume rather than a
+      # tmpfs because the certificate is what peers have been told to trust:
+      # losing it means re-doing the metadata exchange with every one of them.
+      - saml-keys:/var/lib/campusid/saml
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -107,3 +114,4 @@ networks:
 volumes:
   postgres-data:
   redis-data:
+  saml-keys:

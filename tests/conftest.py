@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 from campusid.app import create_app
 from campusid.config import Environment, Settings
+from campusid.keys import SigningMaterial, generate_self_signed
 from campusid.saml.gate import AssertionGate, GatePolicy, IdPResolver, TrustedIdP
 from campusid.saml.stores import OutstandingRequest
 from tests.support.saml_forge import ForgedIdP
@@ -105,13 +107,24 @@ def gate(
     )
 
 
+@pytest.fixture(scope="session")
+def sp_material() -> SigningMaterial:
+    """The broker's own keypair, 2048-bit for speed.
+
+    Production uses 3072 (PRD 11.2); generating that per test would cost
+    seconds each for no additional coverage.
+    """
+    return generate_self_signed("https://broker.test", key_size=2048)
+
+
 @pytest.fixture
-def settings() -> Settings:
+def settings(tmp_path: Path) -> Settings:
     """Deterministic settings that never read the ambient environment."""
     return Settings(
         environment=Environment.CI,
         base_url="https://broker.test",
         log_format="console",
+        saml_key_dir=str(tmp_path / "saml"),
     )
 
 

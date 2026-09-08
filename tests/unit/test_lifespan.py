@@ -11,6 +11,7 @@ import pytest
 
 from campusid.app import create_app, lifespan
 from campusid.config import Settings
+from campusid.keys import SigningMaterial
 
 
 class _FakeEngine:
@@ -30,12 +31,17 @@ class _FakeRedis:
 
 
 @pytest.fixture
-def stubs(monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeEngine, _FakeRedis]:
+def stubs(
+    monkeypatch: pytest.MonkeyPatch, sp_material: SigningMaterial
+) -> tuple[_FakeEngine, _FakeRedis]:
     engine = _FakeEngine()
     redis = _FakeRedis()
     monkeypatch.setattr("campusid.app.create_engine", lambda _settings: engine)
     monkeypatch.setattr("campusid.app.create_redis", lambda _settings: redis)
     monkeypatch.setattr("campusid.app.create_session_factory", lambda _engine: object())
+    # Key generation is real elsewhere; here it would cost seconds per test to
+    # re-derive material these assertions never look at.
+    monkeypatch.setattr("campusid.app.load_or_create", lambda _dir, _name, common_name: sp_material)
     return engine, redis
 
 

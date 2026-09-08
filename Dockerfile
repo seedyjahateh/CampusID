@@ -41,7 +41,14 @@ COPY scripts/entrypoint.sh ./scripts/entrypoint.sh
 RUN chmod +x /app/scripts/entrypoint.sh \
     && useradd --uid 10001 --no-create-home --no-user-group --gid users \
        --shell /usr/sbin/nologin campusid \
-    && chown -R campusid:users /app
+    && chown -R campusid:users /app \
+    # The SAML key directory is created here, not just mounted, because Docker
+    # copies ownership from the image path when a named volume is first
+    # populated. Without this the volume arrives root-owned and the
+    # unprivileged broker cannot write its keypair.
+    && mkdir -p /var/lib/campusid/saml \
+    && chown -R campusid:users /var/lib/campusid \
+    && chmod 700 /var/lib/campusid/saml
 USER campusid
 
 EXPOSE 8000

@@ -8,6 +8,7 @@ this module; behaviour differences are expressed as settings values.
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from enum import StrEnum
 from functools import lru_cache
 from typing import Literal, Self
@@ -59,6 +60,15 @@ class Settings(BaseSettings):
     # --- Observability ----------------------------------------------------
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "console"] = "json"
+
+    # --- SAML -------------------------------------------------------------
+    saml_key_dir: str = "/var/lib/campusid/saml"
+    """Where the SP keypair lives. A mounted volume, so the identity a peer
+    trusts survives a restart."""
+
+    saml_default_idp: str | None = None
+    """entityID used by `/saml/sso` when the caller names none. Optional: with
+    several IdPs registered, discovery (M1b) chooses instead."""
 
     # --- Protocol parameters (validated here, enforced in M1+) -----------
     saml_clock_skew_seconds: int = Field(default=180, ge=0, le=300)
@@ -115,6 +125,26 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.PRODUCTION
+
+    # All four derive from `base_url`, so there is exactly one place a
+    # deployment's identity is configured. An entityID that drifted from the
+    # ACS URL would break every registered peer at once, and silently.
+    @property
+    def saml_entity_id(self) -> str:
+        """Our entityID. Also the URL our metadata is published at."""
+        return f"{self.base_url}/saml/metadata"
+
+    @property
+    def saml_acs_url(self) -> str:
+        return f"{self.base_url}/saml/acs"
+
+    @property
+    def saml_slo_url(self) -> str:
+        return f"{self.base_url}/saml/sls"
+
+    @property
+    def saml_clock_skew(self) -> timedelta:
+        return timedelta(seconds=self.saml_clock_skew_seconds)
 
     @property
     def sync_database_url(self) -> str:
