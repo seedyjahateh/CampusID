@@ -63,6 +63,10 @@ class ReasonCode(StrEnum):
     # --- Replay -------------------------------------------------------------
     REPLAY_DETECTED = "replay_detected"
 
+    # --- Federation metadata ----------------------------------------------
+    METADATA_INVALID = "metadata_invalid"
+    METADATA_EXPIRED = "metadata_expired"
+
 
 NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset(
     {
@@ -102,4 +106,13 @@ class SamlRejected(BrokerError):
 
     `detail` is for operators — it may name the offending value and is written
     to the audit record. It never reaches the browser.
+    """
+
+
+class MetadataRejected(BrokerError):
+    """Federation metadata could not be trusted or used.
+
+    Separate from `SamlRejected` because the audiences differ: a rejected
+    assertion is a login failing now, while rejected metadata is an
+    integration that will fail for everyone until an operator fixes it.
     """

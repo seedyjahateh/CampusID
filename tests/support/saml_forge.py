@@ -32,8 +32,15 @@ from cryptography.x509.oid import NameOID
 from lxml import etree
 from signxml import DigestAlgorithm, SignatureMethod, XMLSigner
 
+from campusid.saml.metadata_sp import (
+    BINDING_HTTP_POST,
+    BINDING_HTTP_REDIRECT,
+    SAML2_PROTOCOL,
+    certificate_body,
+)
 from campusid.saml.namespaces import (
     BEARER_CONFIRMATION_METHOD,
+    MD,
     NS,
     Q_ASSERTION,
     Q_ISSUER,
@@ -105,6 +112,72 @@ class ForgedIdP:
     # --- what a well-behaved response looks like -------------------------
     default_audience: str = "https://broker.test/saml/metadata"
     default_destination: str = "https://broker.test/saml/acs"
+
+    def metadata(
+        self,
+        *,
+        valid_until: dt.datetime | None = None,
+        cache_duration: str | None = "PT3600S",
+        key_use: str | None = "signing",
+        include_key: bool = True,
+        include_sso: bool = True,
+        include_slo: bool = True,
+        certificate_override: str | None = None,
+        sso_bindings: tuple[str, ...] = (BINDING_HTTP_REDIRECT, BINDING_HTTP_POST),
+        role: str = "IDPSSODescriptor",
+    ) -> bytes:
+        """Render this IdP's `EntityDescriptor`.
+
+        Child order follows the metadata schema: KeyDescriptor,
+        SingleLogoutService, NameIDFormat, SingleSignOnService. The parser
+        validates against the real XSD, so fixtures have to be genuinely
+        valid — which is the point.
+        """
+        attributes = f' entityID="{self.entity_id}"'
+        if valid_until is not None:
+            attributes += f' validUntil="{_timestamp(valid_until)}"'
+        if cache_duration is not None:
+            attributes += f' cacheDuration="{cache_duration}"'
+
+        key = ""
+        if include_key:
+            body = (
+                certificate_override
+                if certificate_override is not None
+                else certificate_body(self.key.certificate_pem)
+            )
+            use = f' use="{key_use}"' if key_use else ""
+            key = (
+                f"<md:KeyDescriptor{use}>"
+                f'<ds:KeyInfo xmlns:ds="{NS["ds"]}"><ds:X509Data>'
+                f"<ds:X509Certificate>{body}</ds:X509Certificate>"
+                f"</ds:X509Data></ds:KeyInfo>"
+                f"</md:KeyDescriptor>"
+            )
+
+        slo = (
+            f'<md:SingleLogoutService Binding="{BINDING_HTTP_REDIRECT}"'
+            f' Location="{self.entity_id}/slo"/>'
+            if include_slo
+            else ""
+        )
+        sso = (
+            "".join(
+                f'<md:SingleSignOnService Binding="{binding}"' f' Location="{self.entity_id}/sso"/>'
+                for binding in sso_bindings
+            )
+            if include_sso
+            else ""
+        )
+
+        return (
+            f'<md:EntityDescriptor xmlns:md="{MD}"{attributes}>'
+            f'<md:{role} WantAuthnRequestsSigned="true"'
+            f' protocolSupportEnumeration="{SAML2_PROTOCOL}">'
+            f"{key}{slo}{sso}"
+            f"</md:{role}>"
+            f"</md:EntityDescriptor>"
+        ).encode()
 
     def response(
         self,
