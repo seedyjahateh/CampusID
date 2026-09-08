@@ -20,18 +20,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from functools import lru_cache
-from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 from lxml import etree
 
 from campusid.saml.namespaces import DS, MD, SAML
 from campusid.saml.parser import hardened_parser
+from campusid.saml.schema import METADATA_SCHEMA, load_schema
 from campusid.saml.stores import utcnow
-
-SCHEMA_DIR: Final = Path(__file__).resolve().parent / "schemas"
-METADATA_SCHEMA: Final = "saml-schema-metadata-2.0.xsd"
 
 SAML2_PROTOCOL: Final = "urn:oasis:names:tc:SAML:2.0:protocol"
 BINDING_HTTP_POST: Final = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
@@ -211,33 +207,9 @@ def validate_metadata(document: bytes) -> None:
     metadata_schema().assertValid(etree.fromstring(document, parser=hardened_parser()))
 
 
-class _LocalSchemaResolver(etree.Resolver):
-    """Map the schema imports to vendored files.
-
-    The metadata schema imports xmldsig, xmlenc and the XML namespace by
-    absolute `http://` URL. Without this, loading it would reach out to
-    w3.org — turning validation into a network call that is slow, flaky,
-    unavailable in CI, and controlled by whoever can answer that request.
-    Anything not vendored is refused rather than fetched.
-    """
-
-    # lxml-stubs omits the `context` parameter that lxml actually passes.
-    def resolve(self, system_url: str, public_id: str | None, context: Any) -> Any:  # type: ignore[override]
-        candidate = SCHEMA_DIR / system_url.rsplit("/", 1)[-1]
-        if candidate.is_file():
-            return self.resolve_filename(str(candidate), context)  # type: ignore[attr-defined]
-        raise FileNotFoundError(
-            f"schema {system_url!r} is not vendored in {SCHEMA_DIR}; "
-            "add it there rather than allowing a network fetch"
-        )
-
-
-@lru_cache(maxsize=1)
 def metadata_schema() -> etree.XMLSchema:
-    """Compile the metadata schema once. Compilation costs ~50ms."""
-    parser = etree.XMLParser(no_network=True)
-    parser.resolvers.add(_LocalSchemaResolver())
-    return etree.XMLSchema(etree.parse(str(SCHEMA_DIR / METADATA_SCHEMA), parser=parser))
+    """The compiled SAML metadata schema."""
+    return load_schema(METADATA_SCHEMA)
 
 
 def certificate_body(pem: str) -> str:

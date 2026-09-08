@@ -57,6 +57,12 @@ ignore = [
 # reason to carry.
 "campusid/saml/metadata_sp.py" = ["S320"]
 "campusid/saml/metadata_idp.py" = ["S320"]  # parses via hardened_parser()
+"campusid/saml/schema.py" = ["S320"]  # loads local, vendored schema files only
+# S320: validates our own generated output.
+# S105: flake8-bandit reads "PASSWORD" in PASSWORD_PROTECTED_TRANSPORT as a
+#       credential. It is the SAML authentication-context URI for a password
+#       submitted over a protected channel.
+"campusid/saml/authn_request.py" = ["S320", "S105"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["campusid"]

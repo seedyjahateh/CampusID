@@ -209,9 +209,9 @@ def test_schema_loading_never_reaches_the_network() -> None:
     in CI, and dependent on whoever can answer for w3.org. This asserts every
     import is satisfied from the vendored directory.
     """
-    from campusid.saml.metadata_sp import SCHEMA_DIR, _LocalSchemaResolver
+    from campusid.saml.schema import SCHEMA_DIR, LocalSchemaResolver
 
-    resolver = _LocalSchemaResolver()
+    resolver = LocalSchemaResolver()
 
     with pytest.raises(FileNotFoundError, match="not vendored"):
         resolver.resolve("http://example.test/not-vendored.xsd", None, None)
