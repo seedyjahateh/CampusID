@@ -47,6 +47,18 @@ from campusid.saml.namespaces import (
 ENVELOPED_SIGNATURE_TRANSFORM = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
 
 
+def assert_no_wrapping(root: etree._Element) -> None:
+    """Run every document-level wrapping defense, in gate order.
+
+    The gate calls this before verification. Keeping the composition here
+    rather than in `gate.py` means the negative suite exercises the real
+    sequence, so a check cannot be dropped from the gate while its own unit
+    test keeps passing.
+    """
+    assert_single_response_and_assertion(root)
+    assert_signature_placement(root)
+
+
 def assert_single_response_and_assertion(root: etree._Element) -> None:
     """**D1** — exactly one `Response` and at most one assertion, document-wide.
 

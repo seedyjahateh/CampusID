@@ -66,10 +66,16 @@ plugins = ["pydantic.mypy"]
 module = ["alembic.*"]
 ignore_missing_imports = true
 
-# lxml-stubs is incomplete and signxml ships no stubs at all.
 [[tool.mypy.overrides]]
-module = ["signxml.*", "fakeredis.*"]
+module = ["fakeredis.*"]
 ignore_missing_imports = true
+
+# signxml is typed but re-exports its public names through __init__ without an
+# __all__, which strict mode's no_implicit_reexport rejects. Importing from the
+# private submodules instead would couple us to its internal layout.
+[[tool.mypy.overrides]]
+module = ["signxml.*"]
+implicit_reexport = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

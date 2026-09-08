@@ -15,6 +15,23 @@ from httpx import ASGITransport, AsyncClient
 
 from campusid.app import create_app
 from campusid.config import Environment, Settings
+from tests.support.saml_forge import ForgedIdP
+
+
+@pytest.fixture(scope="session")
+def idp() -> ForgedIdP:
+    """The trusted IdP. Session-scoped: RSA-2048 keygen costs ~100ms."""
+    return ForgedIdP()
+
+
+@pytest.fixture(scope="session")
+def other_idp() -> ForgedIdP:
+    """A second IdP, for signatures that verify against the wrong key.
+
+    A separate entity rather than a stray keypair, because the realistic
+    failure is a *registered* peer signing for someone else's entityID.
+    """
+    return ForgedIdP(entity_id="https://other-idp.test/saml")
 
 
 @pytest.fixture
