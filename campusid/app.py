@@ -21,6 +21,7 @@ from campusid.keys import load_or_create
 from campusid.lifecycle.orchestrator import LifecycleOrchestrator
 from campusid.lifecycle.rules import RulesStore
 from campusid.lifecycle.store import LifecycleStore
+from campusid.lifecycle.sweeper import GraceSweeper
 from campusid.logging import configure_logging, get_logger
 from campusid.middleware import (
     BodySizeLimitMiddleware,
@@ -147,6 +148,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
 
+    # What ends a grace period is somebody looking. The deadline is durable
+    # because it is a column; this is the process that reads it.
+    sweeper = GraceSweeper(app.state.lifecycle)
+    app.state.grace_sweeper = sweeper
+    sweeper.start()
+
     log.info(
         "broker.startup",
         environment=settings.environment.value,
@@ -157,7 +164,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         # Ordered teardown so in-flight requests drain before the pool closes
-        # (NFR-AVAIL-06).
+        # (NFR-AVAIL-06). The sweep goes first: a cancelled task still holds a
+        # connection until it unwinds, and disposing the pool underneath it is
+        # how a clean shutdown produces an alarming traceback.
+        await sweeper.stop()
         await logout_http.aclose()
         await redis.aclose()
         await engine.dispose()
