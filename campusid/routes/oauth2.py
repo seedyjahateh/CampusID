@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from campusid.errors import BrokerError, ReasonCode
 from campusid.logging import get_logger
-from campusid.oidc import pkce
+from campusid.oidc import bearer, pkce
 from campusid.oidc.clients import ClientType, OidcClient
 from campusid.oidc.errors import (
     INVALID_CLIENT,
@@ -387,6 +387,138 @@ async def _claims_for(
         scope=settings.scope,
     )
     return identity.claims
+
+
+# --- introspection and revocation (FR-OP-09) -------------------------------
+
+
+@router.post("/oauth2/introspect")
+async def introspect(
+    request: Request,
+    token: Annotated[str, Form()],
+    client_id: Annotated[str | None, Form()] = None,
+    client_secret: Annotated[str | None, Form()] = None,
+) -> Response:
+    """Report whether an access token is currently usable (RFC 7662).
+
+    Two rules make this endpoint safe to expose.
+
+    **It is authenticated.** An unauthenticated introspection endpoint is an
+    oracle: anyone holding a stolen token can ask us to decode it for them, and
+    learn the subject and scope they could not read from the signature alone.
+
+    **A client may only introspect its own tokens.** Asking about somebody
+    else's returns `{"active": false}` — the same answer as an expired token,
+    deliberately, so the endpoint cannot be used to enumerate which tokens exist
+    or which client issued them.
+
+    Every failure is `active: false` rather than an error, which is what RFC
+    7662 asks for and what keeps the response shape from leaking anything.
+    """
+    state = request.app.state
+    try:
+        client = await _authenticated_client(request, client_id, client_secret)
+    except OAuthError as exc:
+        return _token_error(exc)
+
+    try:
+        verified = await bearer.verify(
+            token,
+            keys=state.oidc_keys,
+            grants=state.grants,
+            issuer=state.settings.oidc_issuer,
+            now=utcnow(),
+        )
+    except OAuthError:
+        return JSONResponse({"active": False}, headers=NO_STORE)
+
+    if verified.client_id != client.client_id:
+        return JSONResponse({"active": False}, headers=NO_STORE)
+
+    claims = verified.claims
+    return JSONResponse(
+        {
+            "active": True,
+            "sub": claims["sub"],
+            "client_id": claims["client_id"],
+            "scope": claims.get("scope", ""),
+            "token_type": "Bearer",
+            "exp": claims["exp"],
+            "iat": claims["iat"],
+            "iss": claims["iss"],
+            "aud": claims["aud"],
+            "jti": claims["jti"],
+            "sid": claims["sid"],
+        },
+        headers=NO_STORE,
+    )
+
+
+@router.post("/oauth2/revoke")
+async def revoke(
+    request: Request,
+    token: Annotated[str, Form()],
+    token_type_hint: Annotated[str | None, Form()] = None,
+    client_id: Annotated[str | None, Form()] = None,
+    client_secret: Annotated[str | None, Form()] = None,
+) -> Response:
+    """Revoke a token and everything descended from the same grant (RFC 7009).
+
+    Returns 200 whether or not the token existed, which the RFC requires: a
+    caller that could tell "revoked" from "never existed" could enumerate
+    tokens through the endpoint meant to destroy them. Only a client
+    authentication failure is an error.
+
+    Revocation acts on the *family*, not the token. RFC 7009 says revoking a
+    refresh token should invalidate the access tokens issued alongside it, and
+    since ours are JWTs the only way to do that is the family marker the bearer
+    check consults. Revoking an access token therefore also ends its refresh
+    lineage — which is what a client calling this at logout actually wants, and
+    is stated here because the narrower reading would leave a live refresh token
+    behind after an explicit revocation.
+    """
+    state = request.app.state
+    try:
+        client = await _authenticated_client(request, client_id, client_secret)
+    except OAuthError as exc:
+        return _token_error(exc)
+
+    family = await _family_of(request, token, client)
+    if family is not None:
+        await state.grants.revoke_family(family)
+        log.info("oidc.token.revoked", client_id=client.client_id)
+
+    return Response(status_code=200, headers=NO_STORE)
+
+
+async def _family_of(request: Request, token: str, client: OidcClient) -> str | None:
+    """Find the grant family a presented token belongs to, if it is this
+    client's.
+
+    Tries the access-token shape first and the refresh-token store second,
+    rather than trusting `token_type_hint`: the hint is a caller's optimisation,
+    and RFC 7009 §2.1 requires a server to try the other type anyway when it
+    fails. Believing it would make revocation silently do nothing for a client
+    that got the hint wrong.
+    """
+    state = request.app.state
+    try:
+        verified = await bearer.verify(
+            token,
+            keys=state.oidc_keys,
+            grants=state.grants,
+            issuer=state.settings.oidc_issuer,
+            now=utcnow(),
+        )
+    except OAuthError:
+        pass
+    else:
+        return verified.family_id if verified.client_id == client.client_id else None
+
+    record: RefreshToken | None = await state.grants.describe_refresh_token(token)
+    if record is None or record.client_id != client.client_id:
+        return None
+    return record.family_id
 
 
 # --- client authentication -------------------------------------------------

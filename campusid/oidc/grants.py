@@ -275,6 +275,16 @@ class GrantStore:
         )
         return await self.issue_refresh_token(successor), successor
 
+    async def describe_refresh_token(self, token: str) -> RefreshToken | None:
+        """Look a refresh token up without spending it.
+
+        For revocation, which must not consume the credential it is destroying:
+        marking it spent would make a second revocation call look like reuse and
+        revoke a family that a legitimate client had already asked us to revoke.
+        """
+        raw = await self._redis.get(f"{REFRESH_KEY_PREFIX}{_digest(token)}")
+        return RefreshToken.from_json(raw) if raw is not None else None
+
     # --- families ----------------------------------------------------------
 
     async def revoke_family(self, family_id: str) -> None:
