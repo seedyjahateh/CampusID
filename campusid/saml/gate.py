@@ -48,6 +48,7 @@ from typing import Literal, overload
 from lxml import etree
 
 from campusid.errors import ReasonCode, SamlRejected
+from campusid.saml.encryption import decrypt_assertion
 from campusid.saml.namespaces import (
     BEARER_CONFIRMATION_METHOD,
     Q_ASSERTION,
@@ -59,6 +60,7 @@ from campusid.saml.namespaces import (
     Q_AUTHN_CONTEXT_CLASS_REF,
     Q_AUTHN_STATEMENT,
     Q_CONDITIONS,
+    Q_ENCRYPTED_ASSERTION,
     Q_ISSUER,
     Q_NAME_ID,
     Q_ONE_TIME_USE,
@@ -151,12 +153,14 @@ class AssertionGate:
         replay_cache: ReplayCache,
         request_store: RequestStore,
         now: Callable[[], datetime] = utcnow,
+        decryption_key: bytes | None = None,
     ) -> None:
         self._policy = policy
         self._resolve_idp = resolve_idp
         self._replay = replay_cache
         self._requests = request_store
         self._now = now
+        self._decryption_key = decryption_key
 
     async def validate(self, document: bytes) -> AssertionFacts:
         """Run every check in order, or raise `SamlRejected`."""
@@ -249,6 +253,10 @@ class AssertionGate:
                 certificates=idp.signing_certificates,
             )
 
+        encrypted = root.find(Q_ENCRYPTED_ASSERTION)
+        if encrypted is not None:
+            return self._verify_encrypted(encrypted, idp)
+
         assertion = root.find(Q_ASSERTION)
         if assertion is None:
             raise SamlRejected(ReasonCode.MALFORMED_RESPONSE, "response contains no Assertion")
@@ -268,6 +276,37 @@ class AssertionGate:
             root,
             assertion,
             location=ASSERTION_SIGNATURE_LOCATION,
+            certificates=idp.signing_certificates,
+        ).element
+
+    def _verify_encrypted(self, encrypted: etree._Element, idp: TrustedIdP) -> etree._Element:
+        """Decrypt, then verify the signature *inside* the plaintext.
+
+        Decryption necessarily precedes assertion-signature verification: when
+        only the assertion is signed — the common case — there is nothing to
+        verify until the plaintext exists. The signature is then checked within
+        the decrypted fragment, which stands alone as its own document rather
+        than being grafted back into the Response, so an attacker cannot use
+        the outer tree to influence what the reference resolves to.
+        """
+        if self._decryption_key is None:
+            raise SamlRejected(
+                ReasonCode.DECRYPTION_FAILED,
+                "the response is encrypted but no decryption key is configured",
+            )
+
+        assertion = decrypt_assertion(encrypted, self._decryption_key)
+        if assertion.tag != Q_ASSERTION:
+            raise SamlRejected(
+                ReasonCode.DECRYPTION_FAILED,
+                f"decrypted to {etree.QName(assertion).localname!r}, expected Assertion",
+            )
+
+        assert_no_wrapping(assertion)
+        return verify_signature(
+            assertion,
+            assertion,
+            location=RESPONSE_SIGNATURE_LOCATION,  # the fragment's own root
             certificates=idp.signing_certificates,
         ).element
 

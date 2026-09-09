@@ -31,7 +31,7 @@ from typing import Annotated, Final
 from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from campusid.errors import BrokerError, ReasonCode
+from campusid.errors import BrokerError, ReasonCode, SamlRejected
 from campusid.logging import get_logger
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
 from campusid.saml.stores import OutstandingRequest, utcnow
@@ -126,21 +126,12 @@ async def assertion_consumer_service(
     state = request.app.state
     correlation_id = _correlation_id()
 
-    if not await _binding_matches(request, RelayState):
-        return _reject(
-            ReasonCode.REQUEST_BINDING_INVALID,
-            "the response was not solicited by this browser",
-            correlation_id,
-        )
-
+    # Every failure from here is a `BrokerError`, so there is one rejection
+    # path rather than three shapes of it — which is what makes the uniform
+    # error response easy to keep uniform.
     try:
-        document = base64.b64decode(SAMLResponse, validate=True)
-    except (binascii.Error, ValueError):
-        return _reject(
-            ReasonCode.MALFORMED_RESPONSE, "SAMLResponse is not valid base64", correlation_id
-        )
-
-    try:
+        await assert_request_binding(request, RelayState)
+        document = _decode(SAMLResponse)
         facts = await state.gate.validate(document)
     except BrokerError as exc:
         return _reject(exc.reason, exc.detail or "", correlation_id)
@@ -200,21 +191,36 @@ def _binding_key(relay_state: str) -> str:
     return f"{BINDING_KEY_PREFIX}{relay_state}"
 
 
-async def _binding_matches(request: Request, relay_state: str | None) -> bool:
+async def assert_request_binding(request: Request, relay_state: str | None) -> None:
     """Confirm this response answers a request *this browser* started.
 
     Without it, an attacker can hand a victim a valid `RelayState` and have
     them log in as somebody else — login CSRF. The stored nonce is fetched and
     deleted in one step so a captured `RelayState` cannot be reused, and the
     comparison is constant-time because one side is attacker-supplied.
+
+    Raises rather than returning a boolean so it composes with every other
+    check in the ACS, all of which signal failure the same way.
     """
     if relay_state is None:
-        return False
+        raise SamlRejected(ReasonCode.REQUEST_BINDING_INVALID, "response carries no RelayState")
+
     presented = request.cookies.get(REQUEST_BINDING_COOKIE)
     expected = await request.app.state.redis.getdel(_binding_key(relay_state))
-    if presented is None or expected is None:
-        return False
-    return secrets.compare_digest(presented, expected)
+    if presented is None or expected is None or not secrets.compare_digest(presented, expected):
+        raise SamlRejected(
+            ReasonCode.REQUEST_BINDING_INVALID,
+            "the response was not solicited by this browser",
+        )
+
+
+def _decode(encoded: str) -> bytes:
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise SamlRejected(
+            ReasonCode.MALFORMED_RESPONSE, "SAMLResponse is not valid base64"
+        ) from exc
 
 
 def _correlation_id() -> str:

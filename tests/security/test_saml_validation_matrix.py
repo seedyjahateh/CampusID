@@ -17,9 +17,9 @@ from collections.abc import Callable
 import pytest
 
 from campusid.errors import ReasonCode, SamlRejected
-from campusid.saml.gate import AssertionGate
+from campusid.saml.gate import AssertionGate, GatePolicy, IdPResolver
 from tests.support.saml_forge import ForgedIdP
-from tests.support.stores import InMemoryRequestStore
+from tests.support.stores import InMemoryReplayCache, InMemoryRequestStore
 
 pytestmark = pytest.mark.security
 
@@ -234,18 +234,65 @@ async def test_accepts_either_signing_arrangement(
     assert facts.assertion_id == "_assertion1"
 
 
-@pytest.mark.parametrize("offset_seconds", [-179, 0, 179])
+@pytest.mark.parametrize("offset_seconds", [-170, 0, 170])
 async def test_accepts_within_the_clock_skew_allowance(
     gate: AssertionGate, idp: ForgedIdP, offset_seconds: int
 ) -> None:
     """Clock skew between an IdP and an SP is the most common cause of a
-    working integration failing in production."""
+    working integration failing in production.
+
+    Offsets stay ten seconds clear of the 180s boundary because the gate reads
+    its own clock, a moment after this test read one: at -179 the margin is a
+    single second and the test fails whenever the machine is loaded. The exact
+    boundary is pinned deterministically below instead.
+    """
     now = dt.datetime.now(dt.UTC)
     facts = await gate.validate(
         idp.response(not_on_or_after=now + dt.timedelta(seconds=offset_seconds))
     )
 
     assert facts.assertion_id == "_assertion1"
+
+
+@pytest.mark.parametrize(
+    ("offset_seconds", "accepted"),
+    [(-181, False), (-180, False), (-179, True), (0, True)],
+)
+async def test_the_skew_boundary_is_exact(
+    gate_policy: GatePolicy,
+    resolve_idp: IdPResolver,
+    request_store: InMemoryRequestStore,
+    idp: ForgedIdP,
+    offset_seconds: int,
+    accepted: bool,
+) -> None:
+    """The boundary itself, with a frozen clock.
+
+    Wall-clock tests cannot assert a one-second edge without being flaky, and a
+    skew allowance that silently drifts by a second either rejects valid logins
+    or extends the window an attacker has.
+    """
+    frozen = dt.datetime(2026, 9, 8, 12, 0, tzinfo=dt.UTC)
+    gate = AssertionGate(
+        policy=gate_policy,
+        resolve_idp=resolve_idp,
+        replay_cache=InMemoryReplayCache(),
+        request_store=request_store,
+        now=lambda: frozen,
+    )
+    document = idp.response(
+        not_on_or_after=frozen + dt.timedelta(seconds=offset_seconds),
+        subject_not_on_or_after=frozen + dt.timedelta(hours=1),
+        not_before=frozen - dt.timedelta(hours=1),
+        authn_instant=frozen,
+    )
+
+    if accepted:
+        assert (await gate.validate(document)).assertion_id == "_assertion1"
+    else:
+        with pytest.raises(SamlRejected) as exc:
+            await gate.validate(document)
+        assert exc.value.reason is ReasonCode.ASSERTION_EXPIRED
 
 
 async def test_a_recognised_condition_is_accepted(gate: AssertionGate, idp: ForgedIdP) -> None:

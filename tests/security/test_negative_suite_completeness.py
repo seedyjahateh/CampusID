@@ -49,17 +49,15 @@ def test_every_reason_code_is_exercised() -> None:
     )
 
 
-def test_deferred_codes_are_declared_deliberately() -> None:
-    """`NOT_YET_REACHABLE` is an escape hatch, so it must stay small and named.
+def test_nothing_is_deferred() -> None:
+    """`NOT_YET_REACHABLE` is empty, and should stay that way.
 
-    Enumerating it here means growing the set is a deliberate edit to a test
-    rather than a quiet way to silence the check above. Every entry names the
-    milestone that removes it.
+    It held the encryption codes until M1b implemented `EncryptedAssertion`,
+    and `REQUEST_BINDING_INVALID` until the ACS grew its login-CSRF check.
+    Every declared reason code now has a test that asserts it.
+
+    Enumerating the set here means adding to it is a deliberate edit to a test
+    rather than a quiet way to silence the check above — which is the only
+    thing that keeps that check meaningful.
     """
-    assert {code.name for code in NOT_YET_REACHABLE} == {
-        # M2, with assertion decryption
-        "DECRYPTION_FAILED",
-        "UNSUPPORTED_ENCRYPTION_ALGORITHM",
-        # later in M1, with the request-binding cookie
-        "REQUEST_BINDING_INVALID",
-    }
+    assert frozenset() == NOT_YET_REACHABLE

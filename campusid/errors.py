@@ -68,28 +68,18 @@ class ReasonCode(StrEnum):
     METADATA_EXPIRED = "metadata_expired"
 
 
-NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset(
-    {
-        # Assertion decryption lands in M2 alongside the release policy that
-        # actually mandates it (FR-SAML-03, ADR-003 D3). The codes are declared
-        # now so the audit vocabulary is stable, and exempted here so the
-        # completeness meta-test stays honest rather than being weakened.
-        #
-        # This entry MUST be gone by the end of M2.
-        ReasonCode.DECRYPTION_FAILED,
-        ReasonCode.UNSUPPORTED_ENCRYPTION_ALGORITHM,
-        # Raised when the request-binding cookie does not match the RelayState
-        # record — the login-CSRF defence. Lands with the session cookies later
-        # in M1; declared now because the ACS already reasons about RelayState.
-        ReasonCode.REQUEST_BINDING_INVALID,
-    }
-)
+NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset()
 """Codes with no reachable code path yet, exempt from the completeness test.
 
-An escape hatch, so it is enumerated in `test_negative_suite_completeness.py`
-and every entry names the milestone that removes it. Adding a code here to
-silence a failing build, rather than to record deliberately deferred work,
-defeats the purpose of the check."""
+**Currently empty, and worth keeping that way.** It held the encryption codes
+until M1b implemented `EncryptedAssertion`, and `REQUEST_BINDING_INVALID` until
+the ACS grew its login-CSRF check. Both are now exercised by real tests.
+
+It exists as an escape hatch for a code that must join the audit vocabulary
+before its implementation lands. Its contents are enumerated in
+`test_negative_suite_completeness.py`, so growing it is a deliberate edit to a
+test rather than a quiet way to silence a failing build — which is the only
+thing that keeps the completeness check meaningful."""
 
 
 class BrokerError(Exception):

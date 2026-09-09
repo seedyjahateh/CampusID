@@ -65,5 +65,14 @@ Q_TRANSFORMS: Final = qn(DS, "Transforms")
 Q_TRANSFORM: Final = qn(DS, "Transform")
 Q_OBJECT: Final = qn(DS, "Object")
 
+Q_ENCRYPTED_DATA: Final = qn(XENC, "EncryptedData")
+Q_ENCRYPTED_KEY: Final = qn(XENC, "EncryptedKey")
+Q_ENCRYPTION_METHOD: Final = qn(XENC, "EncryptionMethod")
+Q_CIPHER_DATA: Final = qn(XENC, "CipherData")
+Q_CIPHER_VALUE: Final = qn(XENC, "CipherValue")
+Q_KEY_INFO: Final = qn(DS, "KeyInfo")
+Q_RETRIEVAL_METHOD: Final = qn(DS, "RetrievalMethod")
+Q_MGF: Final = qn(XENC11, "MGF")
+
 BEARER_CONFIRMATION_METHOD: Final = "urn:oasis:names:tc:SAML:2.0:cm:bearer"
 STATUS_SUCCESS: Final = "urn:oasis:names:tc:SAML:2.0:status:Success"

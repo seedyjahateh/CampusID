@@ -20,14 +20,19 @@ module is for anything that has to actually verify.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
 import signxml
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.x509 import load_pem_x509_certificate
 from cryptography.x509.oid import NameOID
 from lxml import etree
 from signxml import DigestAlgorithm, SignatureMethod, XMLSigner
@@ -48,6 +53,8 @@ from campusid.saml.namespaces import (
     Q_SIGNATURE,
     SAML,
     SAMLP,
+    XENC,
+    XENC11,
 )
 
 XMLDSIG_TIME = "%Y-%m-%dT%H:%M:%SZ"
@@ -55,6 +62,18 @@ XMLDSIG_TIME = "%Y-%m-%dT%H:%M:%SZ"
 SignTarget = Literal["assertion", "response", "both"] | None
 
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
+
+# --- XML Encryption algorithm URIs ------------------------------------------
+# Declared before ForgedIdP because they are default argument values, which
+# Python evaluates when the class body runs.
+AES128_GCM = f"{XENC11}aes128-gcm"
+AES256_GCM = f"{XENC11}aes256-gcm"
+AES256_CBC = f"{XENC}aes256-cbc"
+RSA_OAEP = f"{XENC11}rsa-oaep"
+RSA_OAEP_MGF1P = f"{XENC}rsa-oaep-mgf1p"
+RSA_1_5 = f"{XENC}rsa-1_5"
+
+_GCM_KEY_BYTES = {AES128_GCM: 16, f"{XENC11}aes192-gcm": 24, AES256_GCM: 32}
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +233,11 @@ class ForgedIdP:
         # signing
         sign: SignTarget = "assertion",
         sign_with: SigningKey | None = None,
+        # encryption
+        encrypt_for: str | None = None,
+        encryption_algorithm: str = AES256_GCM,
+        key_transport_algorithm: str = RSA_OAEP,
+        nested_encrypted_key: bool = True,
         # post-signing tampering
         signature_method_uri: str | None = None,
         digest_method_uri: str | None = None,
@@ -270,6 +294,14 @@ class ForgedIdP:
 
         if signature_method_uri or digest_method_uri or c14n_method_uri:
             _rewrite_algorithms(root, signature_method_uri, digest_method_uri, c14n_method_uri)
+        if encrypt_for is not None:
+            _encrypt_assertion(
+                root,
+                encrypt_for,
+                content_algorithm=encryption_algorithm,
+                key_algorithm=key_transport_algorithm,
+                nested_key=nested_encrypted_key,
+            )
         if xsw is not None:
             root = apply_xsw(root, xsw)
 
@@ -451,6 +483,91 @@ def _rewrite_algorithms(
         if c14n_method_uri:
             for node in signature.iter(f"{{{NS['ds']}}}CanonicalizationMethod"):
                 node.set("Algorithm", c14n_method_uri)
+
+
+# --- XML Encryption ---------------------------------------------------------
+
+
+def _encrypt_assertion(
+    root: etree._Element,
+    recipient_certificate_pem: str,
+    *,
+    content_algorithm: str,
+    key_algorithm: str,
+    nested_key: bool,
+) -> None:
+    """Replace the Response's Assertion with an EncryptedAssertion.
+
+    Encrypts for real, so the decryptor is exercised against genuine
+    ciphertext. ``nested_key`` toggles between the two layouts real IdPs use:
+    the `EncryptedKey` inside `EncryptedData/KeyInfo`, or as its sibling.
+    """
+    assertion = root.find(Q_ASSERTION)
+    assert assertion is not None
+    plaintext = etree.tostring(assertion, encoding="utf-8")
+
+    key_length = _GCM_KEY_BYTES.get(content_algorithm, 32)
+    session_key = os.urandom(key_length)
+
+    if content_algorithm.endswith("-gcm"):
+        iv = os.urandom(12)
+        body = iv + AESGCM(session_key).encrypt(iv, plaintext, None)
+    else:
+        # CBC, only so the refusal path can be tested. Padding is ISO 10126 as
+        # XML-Enc specifies, not PKCS#7.
+        iv = os.urandom(16)
+        pad = 16 - (len(plaintext) % 16)
+        padded = plaintext + os.urandom(pad - 1) + bytes([pad])
+        encryptor = Cipher(algorithms.AES(session_key), modes.CBC(iv)).encryptor()
+        body = iv + encryptor.update(padded) + encryptor.finalize()
+
+    public_key = load_pem_x509_certificate(recipient_certificate_pem.encode()).public_key()
+    assert isinstance(public_key, rsa.RSAPublicKey)
+    if key_algorithm == RSA_OAEP_MGF1P:
+        oaep = padding.OAEP(
+            mgf=padding.MGF1(hashes.SHA1()),  # noqa: S303 - fixed by the 2002 spec
+            algorithm=hashes.SHA1(),  # noqa: S303
+            label=None,
+        )
+        key_method = f'<xenc:EncryptionMethod Algorithm="{key_algorithm}"/>'
+    else:
+        oaep = padding.OAEP(
+            mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None
+        )
+        key_method = (
+            f'<xenc:EncryptionMethod Algorithm="{key_algorithm}">'
+            f'<ds:DigestMethod xmlns:ds="{NS["ds"]}" Algorithm="{XENC}sha256"/>'
+            f'<xenc11:MGF xmlns:xenc11="{XENC11}" Algorithm="{XENC11}mgf1sha256"/>'
+            f"</xenc:EncryptionMethod>"
+        )
+    wrapped = public_key.encrypt(session_key, oaep)
+
+    encrypted_key = (
+        f'<xenc:EncryptedKey xmlns:xenc="{XENC}">'
+        f"{key_method}"
+        f"<xenc:CipherData>"
+        f"<xenc:CipherValue>{base64.b64encode(wrapped).decode()}</xenc:CipherValue>"
+        f"</xenc:CipherData>"
+        f"</xenc:EncryptedKey>"
+    )
+    key_info = (
+        f'<ds:KeyInfo xmlns:ds="{NS["ds"]}">{encrypted_key}</ds:KeyInfo>' if nested_key else ""
+    )
+    sibling_key = "" if nested_key else encrypted_key
+
+    markup = (
+        f'<saml:EncryptedAssertion xmlns:saml="{SAML}" xmlns:xenc="{XENC}">'
+        f'<xenc:EncryptedData Type="{XENC}Element">'
+        f'<xenc:EncryptionMethod Algorithm="{content_algorithm}"/>'
+        f"{key_info}"
+        f"<xenc:CipherData>"
+        f"<xenc:CipherValue>{base64.b64encode(body).decode()}</xenc:CipherValue>"
+        f"</xenc:CipherData>"
+        f"</xenc:EncryptedData>"
+        f"{sibling_key}"
+        f"</saml:EncryptedAssertion>"
+    )
+    root.replace(assertion, etree.fromstring(markup.encode(), parser=_PARSER))
 
 
 # --- XML Signature Wrapping variants ---------------------------------------
