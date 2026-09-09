@@ -47,7 +47,7 @@ def _write(directory: Path, name: str, body: str) -> Path:
 
 
 def test_a_valid_policy_loads(tmp_path: Path) -> None:
-    policy = load_file(_write(tmp_path, "portal.yaml", VALID))
+    policy, _ = load_file(_write(tmp_path, "portal.yaml", VALID))
 
     assert policy.sp_entity_id == "https://portal.campus.test/sp"
     assert policy.display_name == "Campus Portal"
@@ -82,6 +82,49 @@ def test_two_files_cannot_claim_one_sp(tmp_path: Path) -> None:
     filenames."""
     _write(tmp_path, "a.yaml", VALID)
     _write(tmp_path, "b.yaml", VALID)
+
+    with pytest.raises(PolicyError, match="already defined"):
+        load_directory(tmp_path)
+
+
+def test_an_alias_reaches_the_same_policy(tmp_path: Path) -> None:
+    """One application, two protocols, one policy.
+
+    The portal is a SAML entityID to Shibboleth and a `client_id` to an OIDC
+    library. Duplicating its policy into two files is how the two drift, and the
+    drift is invisible until somebody notices an app sees more over one protocol
+    than the other.
+    """
+    _write(
+        tmp_path,
+        "portal.yaml",
+        f"""
+        sp_entity_id: https://portal.campus.test/sp
+        aliases:
+          - campus-portal
+        rules:
+          - id: r
+            effect: allow
+            attribute: {MAIL}
+        """,
+    )
+    store = PolicyStore(tmp_path, default_scope="campus.test")
+
+    by_entity_id = store.get("https://portal.campus.test/sp")
+    by_client_id = store.get("campus-portal")
+
+    assert by_client_id is by_entity_id
+    assert by_client_id.sp_entity_id == "https://portal.campus.test/sp"
+
+
+def test_an_alias_cannot_collide_with_another_policy(tmp_path: Path) -> None:
+    """Whichever file loaded last would silently win the name."""
+    _write(tmp_path, "a.yaml", "sp_entity_id: campus-portal\nrules: []\n")
+    _write(
+        tmp_path,
+        "b.yaml",
+        "sp_entity_id: https://portal.test/sp\naliases: [campus-portal]\nrules: []\n",
+    )
 
     with pytest.raises(PolicyError, match="already defined"):
         load_directory(tmp_path)

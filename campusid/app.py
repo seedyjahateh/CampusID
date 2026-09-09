@@ -18,9 +18,11 @@ from campusid.keys import load_or_create
 from campusid.logging import configure_logging, get_logger
 from campusid.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
 from campusid.oidc import keys as oidc_keys
+from campusid.oidc.grants import GrantStore
 from campusid.oidc.registry import ClientRegistry
 from campusid.policy.loader import PolicyStore
 from campusid.routes import disco as disco_routes
+from campusid.routes import oauth2 as oauth2_routes
 from campusid.routes import oidc as oidc_routes
 from campusid.routes import saml as saml_routes
 from campusid.saml.gate import AssertionGate, GatePolicy
@@ -98,6 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # cached our JWKS would refuse tokens it should honour.
     app.state.oidc_keys = oidc_keys.load_or_create_key_set(Path(settings.saml_key_dir))
     app.state.clients = ClientRegistry(session_factory)
+    app.state.grants = GrantStore(redis)
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
 
     log.info(
@@ -148,5 +151,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(saml_routes.router)
     app.include_router(disco_routes.router)
     app.include_router(oidc_routes.router)
+    app.include_router(oauth2_routes.router)
 
     return app

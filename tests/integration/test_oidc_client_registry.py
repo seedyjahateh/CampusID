@@ -19,7 +19,7 @@ from campusid.config import get_settings
 from campusid.db import create_engine, create_session_factory
 from campusid.errors import ReasonCode
 from campusid.oidc.clients import MIN_SECRET_LENGTH, ClientType
-from campusid.oidc.errors import OAuthError
+from campusid.oidc.errors import OAuthError, may_be_redirected
 from campusid.oidc.models import OidcClientRecord
 from campusid.oidc.registry import ClientRegistry
 
@@ -166,7 +166,7 @@ async def test_requiring_an_unknown_client_refuses(registry: ClientRegistry) -> 
         await registry.require("never-registered")
 
     assert raised.value.reason is ReasonCode.UNKNOWN_CLIENT
-    assert raised.value.redirectable is False
+    assert not may_be_redirected(raised.value)
 
 
 async def test_a_disabled_client_is_indistinguishable_from_an_unknown_one(

@@ -32,6 +32,14 @@ class OutstandingRequest:
     idp_entity_id: str
     relay_state: str
     created_at: datetime
+    return_to: str | None = None
+    """Where to send the browser once the login succeeds.
+
+    Server-side rather than a query parameter or a cookie, deliberately. It is
+    written only by our own `/saml/sso` and read only by our own ACS, so it can
+    never be steered from outside — which is what an open redirect on a login
+    endpoint would be. `None` means the default landing page.
+    """
 
     def to_json(self) -> str:
         return json.dumps(
@@ -40,6 +48,7 @@ class OutstandingRequest:
                 "idp_entity_id": self.idp_entity_id,
                 "relay_state": self.relay_state,
                 "created_at": self.created_at.isoformat(),
+                "return_to": self.return_to,
             }
         )
 
@@ -51,6 +60,7 @@ class OutstandingRequest:
             idp_entity_id=data["idp_entity_id"],
             relay_state=data["relay_state"],
             created_at=datetime.fromisoformat(data["created_at"]),
+            return_to=data.get("return_to"),
         )
 
 

@@ -184,7 +184,6 @@ class OidcClient:
                 INVALID_SCOPE,
                 ReasonCode.SCOPE_NOT_PERMITTED,
                 "the openid scope is required",
-                redirectable=True,
             )
         excess = asked - self.allowed_scopes
         if excess:
@@ -192,7 +191,6 @@ class OidcClient:
                 INVALID_SCOPE,
                 ReasonCode.SCOPE_NOT_PERMITTED,
                 f"{sorted(excess)} not permitted for {self.client_id!r}",
-                redirectable=True,
             )
         return asked
 

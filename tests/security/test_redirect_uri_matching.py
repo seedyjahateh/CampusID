@@ -17,7 +17,13 @@ from campusid.oidc.clients import (
     generate_secret,
     hash_secret,
 )
-from campusid.oidc.errors import INVALID_CLIENT, INVALID_REQUEST, INVALID_SCOPE, OAuthError
+from campusid.oidc.errors import (
+    INVALID_CLIENT,
+    INVALID_REQUEST,
+    INVALID_SCOPE,
+    OAuthError,
+    may_be_redirected,
+)
 
 pytestmark = pytest.mark.security
 
@@ -76,7 +82,7 @@ def test_a_redirect_uri_error_is_never_redirected(client: OidcClient) -> None:
     with pytest.raises(OAuthError) as raised:
         client.validated_redirect_uri("https://evil.test/cb")
 
-    assert raised.value.redirectable is False
+    assert not may_be_redirected(raised.value)
     assert raised.value.error == INVALID_REQUEST
 
 
@@ -280,4 +286,4 @@ def test_a_scope_error_may_be_reported_to_the_client(client: OidcClient) -> None
     with pytest.raises(OAuthError) as raised:
         client.granted_scopes("openid admin")
 
-    assert raised.value.redirectable is True
+    assert may_be_redirected(raised.value)

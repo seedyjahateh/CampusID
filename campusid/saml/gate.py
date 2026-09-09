@@ -141,6 +141,9 @@ class AssertionFacts:
     session_index: str | None
     attributes: dict[str, list[str]] = field(default_factory=dict)
     relay_state: str | None = None
+    return_to: str | None = None
+    """Where the login was started from, carried on the server-side outstanding
+    request. Never read from the response."""
 
 
 class AssertionGate:
@@ -191,6 +194,7 @@ class AssertionGate:
             session_index=session_index,
             attributes=_attributes(assertion),
             relay_state=request.relay_state if request else None,
+            return_to=request.return_to if request else None,
         )
 
     # --- 3. status ---------------------------------------------------------

@@ -89,7 +89,7 @@ async def test_the_jwks_publishes_both_keys_during_a_rotation(
 async def test_neither_document_needs_a_session(client: AsyncClient, path: str) -> None:
     """A client configures itself before anybody has logged in. Requiring
     authentication here would make the provider undiscoverable."""
-    response = await client.get(path, cookies={})
+    response = await client.get(path)
 
     assert response.status_code == 200
 

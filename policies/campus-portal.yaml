@@ -2,8 +2,17 @@
 #
 # Tagged REFEDS R&S, so it receives that bundle without per-attribute rules.
 # The two rules below are the exceptions to the bundle, not a restatement of it.
-sp_entity_id: https://portal.campus.test/oidc
+sp_entity_id: https://portal.campus.test/sp
 display_name: Campus Portal
+
+# The same application, reached by two protocols. Shibboleth knows it by the
+# entityID above; an OIDC library knows it by its client_id. Both resolve to
+# this one policy, so the app cannot end up seeing more over one protocol than
+# the other - and because the subject identifier is derived from sp_entity_id
+# rather than from whichever name was used, the same person is the same person
+# on both paths.
+aliases:
+  - campus-portal
 
 entity_categories:
   - http://refeds.org/category/research-and-scholarship

@@ -74,6 +74,9 @@ class PolicySet:
         default-deny releases nothing but the subject identifier. That is the
         right answer for an unconfigured SP: it can authenticate people, and it
         learns nothing about them until somebody decides what it may see.
+
+        Aliases resolve here too, so an application federated over both SAML and
+        OIDC reaches the same policy under either name.
         """
         return self.policies.get(sp_entity_id) or ReleasePolicy(sp_entity_id=sp_entity_id)
 
@@ -150,7 +153,13 @@ class PolicyStore:
 
 
 def load_directory(directory: Path) -> dict[str, ReleasePolicy]:
-    """Load every policy file in a directory, keyed by SP entityID."""
+    """Load every policy file in a directory, keyed by SP entityID and alias.
+
+    An application federated over both protocols has one policy and several
+    names for it: a SAML entityID and an OIDC `client_id`. Both resolve to the
+    same `ReleasePolicy`, which is what makes "the same app, two protocols,
+    identical release" true rather than a matter of keeping two files in step.
+    """
     policies: dict[str, ReleasePolicy] = {}
     if not directory.is_dir():
         raise PolicyError(f"{directory} is not a policy directory")
@@ -158,17 +167,18 @@ def load_directory(directory: Path) -> dict[str, ReleasePolicy]:
     for path in sorted(directory.iterdir()):
         if path.suffix not in POLICY_SUFFIXES:
             continue
-        policy = load_file(path)
-        if policy.sp_entity_id in policies:
-            # Two files claiming one SP means whichever loaded last silently
-            # wins, and which that is depends on filenames. Refuse instead.
-            raise PolicyError(f"{path.name}: {policy.sp_entity_id!r} is already defined")
-        policies[policy.sp_entity_id] = policy
+        policy, aliases = load_file(path)
+        for name in (policy.sp_entity_id, *aliases):
+            if name in policies:
+                # Two files claiming one name means whichever loaded last
+                # silently wins, and which that is depends on filenames.
+                raise PolicyError(f"{path.name}: {name!r} is already defined")
+            policies[name] = policy
     return policies
 
 
-def load_file(path: Path) -> ReleasePolicy:
-    """Parse and validate one policy file."""
+def load_file(path: Path) -> tuple[ReleasePolicy, tuple[str, ...]]:
+    """Parse and validate one policy file, with the other names it answers to."""
     try:
         # safe_load, always. See the module docstring.
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -177,7 +187,9 @@ def load_file(path: Path) -> ReleasePolicy:
 
     if not isinstance(document, dict):
         raise PolicyError(f"{path.name}: expected a mapping at the top level")
-    return parse_policy(document, source=path.name)
+    policy = parse_policy(document, source=path.name)
+    aliases = tuple(_string_list(document.get("aliases", []), path.name, "aliases"))
+    return policy, aliases
 
 
 def parse_policy(document: dict[str, Any], *, source: str) -> ReleasePolicy:
@@ -188,6 +200,7 @@ def parse_policy(document: dict[str, Any], *, source: str) -> ReleasePolicy:
 
     unknown_keys = set(document) - {
         "sp_entity_id",
+        "aliases",
         "display_name",
         "entity_categories",
         "subject_id_mode",

@@ -16,7 +16,12 @@ import pytest
 
 from campusid.errors import ReasonCode
 from campusid.oidc import pkce
-from campusid.oidc.errors import INVALID_GRANT, INVALID_REQUEST, OAuthError
+from campusid.oidc.errors import (
+    INVALID_GRANT,
+    INVALID_REQUEST,
+    OAuthError,
+    may_be_redirected,
+)
 
 pytestmark = pytest.mark.security
 
@@ -136,8 +141,16 @@ def test_a_missing_or_malformed_challenge_is_refused(challenge: str | None) -> N
     assert raised.value.error == INVALID_REQUEST
 
 
-def test_authorization_errors_are_not_sent_to_the_client() -> None:
-    """Everything here is raised before a redirect URI has been validated."""
+def test_a_pkce_failure_is_reportable_to_the_client() -> None:
+    """This module does not decide where its errors go, and an earlier version
+    that tried to was wrong.
+
+    Whether there is somewhere safe to send a refusal is a property of where in
+    the flow it happened, not of the check: these same functions fail at the
+    authorization endpoint, where the client's registered URI is known and an
+    error belongs there, and at the token endpoint, where there is no redirect
+    at all. Only an error *about* the destination is intrinsically unsendable.
+    """
     calls: list[Callable[[], None]] = [
         lambda: pkce.assert_supported_method(None),
         lambda: pkce.assert_valid_challenge(None),
@@ -147,4 +160,4 @@ def test_authorization_errors_are_not_sent_to_the_client() -> None:
     for call in calls:
         with pytest.raises(OAuthError) as raised:
             call()
-        assert raised.value.redirectable is False
+        assert may_be_redirected(raised.value)

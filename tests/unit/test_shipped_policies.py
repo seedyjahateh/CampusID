@@ -32,7 +32,8 @@ from campusid.policy.release import Basis, ReleasePolicy, Subject, evaluate
 POLICY_DIR = Path(__file__).resolve().parents[2] / "policies"
 
 ANALYTICS = "https://analytics.campus.test/sp"
-PORTAL = "https://portal.campus.test/oidc"
+PORTAL = "https://portal.campus.test/sp"
+PORTAL_CLIENT_ID = "campus-portal"
 COLLAB = "https://collab.research.example/sp"
 
 SAM = Subject(person_key="person-1")
@@ -57,7 +58,15 @@ def policies() -> dict[str, ReleasePolicy]:
 
 
 def test_every_shipped_policy_loads(policies: dict[str, ReleasePolicy]) -> None:
-    assert set(policies) == {ANALYTICS, PORTAL, COLLAB}
+    assert set(policies) == {ANALYTICS, PORTAL, PORTAL_CLIENT_ID, COLLAB}
+
+
+def test_the_portal_has_one_policy_under_both_of_its_names(
+    policies: dict[str, ReleasePolicy],
+) -> None:
+    """G1, as an assertion: one application federated by two protocols, with no
+    application change and no second policy to keep in step."""
+    assert policies[PORTAL_CLIENT_ID] is policies[PORTAL]
 
 
 def test_no_shipped_policy_names_a_restricted_attribute(

@@ -52,6 +52,30 @@ router = APIRouter(tags=["saml"])
 
 REQUEST_TTL: Final = timedelta(minutes=5)
 BINDING_KEY_PREFIX: Final = "saml:binding:"
+DEFAULT_LANDING: Final = "/me"
+
+
+def local_path(candidate: str | None) -> str | None:
+    """Accept a same-origin path, or nothing.
+
+    A login endpoint that redirects wherever it is told is an open redirect with
+    a session cookie attached, so this is deliberately strict: one leading
+    slash, no scheme, no host. `//evil.test` is the case that matters — it is
+    protocol-relative, so a browser reads it as another origin while a naive
+    `startswith("/")` check reads it as local. Backslashes are refused because
+    some browsers normalise them to slashes and some do not, which is a
+    disagreement no security check should sit on top of.
+    """
+    if candidate is None:
+        return None
+    if (
+        not candidate.startswith("/")
+        or candidate.startswith(("//", "/\\"))
+        or "\\" in candidate
+        or "://" in candidate
+    ):
+        raise BrokerError(ReasonCode.INVALID_RETURN_URL, f"{candidate!r} is not a local path")
+    return candidate
 
 
 @router.get("/saml/metadata")
@@ -69,9 +93,23 @@ async def metadata(request: Request) -> Response:
 
 
 @router.get("/saml/sso")
-async def start_sso(request: Request, idp: str | None = None) -> Response:
-    """Begin SP-initiated SSO against a registered IdP."""
+async def start_sso(
+    request: Request, idp: str | None = None, return_to: str | None = None
+) -> Response:
+    """Begin SP-initiated SSO against a registered IdP.
+
+    ``return_to`` is where the browser goes once the login succeeds — used by
+    the OIDC authorization endpoint to resume a pending request. It is validated
+    as a local path here and then carried *server-side* on the outstanding
+    request, so nothing an attacker can reach decides where a completed login
+    lands.
+    """
     state = request.app.state
+    try:
+        destination = local_path(return_to)
+    except BrokerError as exc:
+        return reject(exc.reason, exc.detail or "")
+
     entity_id = idp or state.settings.saml_default_idp
     if entity_id is None:
         # Nobody named an IdP and there is no default, so ask. Discovery sends
@@ -99,6 +137,7 @@ async def start_sso(request: Request, idp: str | None = None) -> Response:
             idp_entity_id=descriptor.entity_id,
             relay_state=prepared.relay_state,
             created_at=utcnow(),
+            return_to=destination,
         ),
         ttl=REQUEST_TTL,
     )
@@ -153,7 +192,7 @@ async def assertion_consumer_service(
         correlation_id=correlation_id,
     )
 
-    response = RedirectResponse("/me", status_code=303)
+    response = RedirectResponse(facts.return_to or DEFAULT_LANDING, status_code=303)
     set_session_cookie(response, session.sid)
     clear_request_binding_cookie(response)
     return response
