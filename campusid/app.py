@@ -6,6 +6,7 @@ import functools
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import FastAPI
@@ -15,6 +16,8 @@ from campusid.audit.log import AuditLog
 from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
+from campusid.directory.client import DirectoryClient
+from campusid.directory.profiles import profile as directory_profile
 from campusid.federation.registry import FederationRegistry
 from campusid.identity.registry import IdentityRegistry
 from campusid.keys import load_or_create
@@ -148,6 +151,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
 
+    # The directory, when one is configured. Absent is a state an operator
+    # chose, so it is not an error — but a *misconfigured* one is, which is why
+    # the profile name is validated at startup rather than at first search.
+    app.state.directory = _directory(settings, redis)
+    if app.state.directory is not None:
+        # Reported rather than fatal. FR-DIR-08 asks that a directory outage
+        # degrade to cached group data, and a readiness probe that failed on it
+        # would take the broker out of rotation for something it can survive.
+        app.state.readiness_probes["directory"] = app.state.directory.healthy
+
     # What ends a grace period is somebody looking. The deadline is durable
     # because it is a column; this is the process that reads it.
     sweeper = GraceSweeper(app.state.lifecycle)
@@ -172,6 +185,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await redis.aclose()
         await engine.dispose()
         log.info("broker.shutdown")
+
+
+def _directory(settings: Settings, redis: Any) -> DirectoryClient | None:
+    """The directory client, or None when no directory is configured.
+
+    None rather than a null object. A caller that has to ask whether there is a
+    directory writes one `if`; a null object that answers "no groups" to every
+    question would be indistinguishable from a directory in which nobody is a
+    member of anything.
+    """
+    if not settings.ldap_enabled:
+        return None
+    return DirectoryClient(
+        profile=directory_profile(settings.ldap_profile),
+        url=settings.ldap_url,
+        base_dn=settings.ldap_base_dn,
+        bind_dn=settings.ldap_bind_dn,
+        bind_password=settings.ldap_bind_password,
+        start_tls=settings.ldap_start_tls,
+        allow_plaintext=settings.ldap_allow_plaintext,
+        cache=redis,
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

@@ -22,6 +22,18 @@ x-broker-env: &broker-env
   CAMPUSID_SAML_DEFAULT_IDP: ${CAMPUSID_SAML_DEFAULT_IDP:-}
   CAMPUSID_POLICY_DIR: /app/policies
   CAMPUSID_LIFECYCLE_RULES_FILE: /app/config/lifecycle_rules.yaml
+  # Empty unless the directory profile is up: a broker configured with a
+  # directory it cannot reach degrades on every login, and one configured with
+  # none simply has no directory.
+  CAMPUSID_LDAP_URL: ${CAMPUSID_LDAP_URL:-}
+  CAMPUSID_LDAP_PROFILE: ${CAMPUSID_LDAP_PROFILE:-openldap}
+  CAMPUSID_LDAP_BASE_DN: ${CAMPUSID_LDAP_BASE_DN:-dc=campus,dc=test}
+  CAMPUSID_LDAP_BIND_DN: ${CAMPUSID_LDAP_BIND_DN:-}
+  CAMPUSID_LDAP_BIND_PASSWORD: ${CAMPUSID_LDAP_BIND_PASSWORD:-}
+  # The dev directory has no certificate, so the broker is told not to try
+  # StartTLS against it. Production refuses both of these settings.
+  CAMPUSID_LDAP_START_TLS: ${CAMPUSID_LDAP_START_TLS:-false}
+  CAMPUSID_LDAP_ALLOW_PLAINTEXT: ${CAMPUSID_LDAP_ALLOW_PLAINTEXT:-false}
   CAMPUSID_SCOPE: ${CAMPUSID_SCOPE:-campus.test}
   # Restore-critical. Rotating it replaces every SP's entire user base with
   # strangers at once, so it is backed up with the database. The broker refuses
@@ -152,6 +164,64 @@ services:
     entrypoint: ["python"]
     command: ["scripts/federation_init.py"]
 
+  # --- directory profile ---------------------------------------------------
+  # An OpenLDAP with the eduPerson-shaped tree the broker reads. Behind its own
+  # profile rather than the federation one: a change to the SAML gate has no
+  # business waiting for a directory to start, and vice versa.
+  #
+  #   docker compose --profile directory up -d
+  #   docker compose --profile directory run --rm directory-init
+  openldap:
+    profiles: [directory]
+    image: osixia/openldap:1.5.0
+    environment:
+      LDAP_ORGANISATION: CampusID
+      LDAP_DOMAIN: campus.test
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?set LDAP_ADMIN_PASSWORD in .env}
+      # Separate from the tree admin because it governs the schema, and the
+      # seeding script loads eduPerson into cn=config with it.
+      LDAP_CONFIG_PASSWORD: ${LDAP_ADMIN_PASSWORD:?set LDAP_ADMIN_PASSWORD in .env}
+      # No TLS in the dev stack: the image would generate a self-signed
+      # certificate for a hostname nothing resolves, and the broker refuses
+      # plaintext in production regardless of what this profile does.
+      LDAP_TLS: "false"
+    ports:
+      - "${LDAP_PORT:-1389}:389"
+    networks: [internal]
+    healthcheck:
+      # The root DSE, which is readable without binding. Probing the suffix
+      # instead would need the admin password in the healthcheck command, and
+      # anonymous access to the tree is denied by default — so that probe fails
+      # for an authorisation reason and reads as a directory that is not up.
+      test:
+        ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost", "-b", "", "-s", "base", "namingContexts"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Seeds the tree over LDAP rather than through the image's own bootstrap.
+  # The same choice federation-init makes about Keycloak, for the same reason:
+  # the fixture is then created the way a real one would be, and the seeding is
+  # not coupled to one image's conventions.
+  directory-init:
+    profiles: [directory]
+    image: campusid/broker:test
+    build:
+      context: .
+      target: dev
+    environment:
+      <<: *broker-env
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?set LDAP_ADMIN_PASSWORD in .env}
+      LDAP_CONFIG_PASSWORD: ${LDAP_ADMIN_PASSWORD:?set LDAP_ADMIN_PASSWORD in .env}
+    depends_on:
+      openldap:
+        condition: service_healthy
+    networks: [internal]
+    restart: "no"
+    entrypoint: ["python"]
+    command: ["scripts/directory_init.py"]
+
   # Test runner: the dev image, which adds the test toolchain. Not started by
   # `docker compose up` — invoke it explicitly:
   #
@@ -163,7 +233,12 @@ services:
       context: .
       target: dev
     image: campusid/broker:test
-    environment: *broker-env
+    environment:
+      <<: *broker-env
+      # The directory tests bind as the admin to set up and tear down entries,
+      # which is a thing only a test does — the broker itself binds as a
+      # read-only service account.
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:-}
     # The working tree, so a test run reflects the file just edited rather than
     # whatever was baked into the image. Only the test runner gets this: the
     # broker stays immutable and read-only, because a container serving code it

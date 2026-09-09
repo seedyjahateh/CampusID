@@ -71,8 +71,14 @@ def test_plaintext_is_allowed_outside_production() -> None:
 
 
 def test_start_tls_is_on_by_default() -> None:
-    """So the insecure case is the one that has to be asked for."""
-    assert _settings().ldap_start_tls
+    """So the insecure case is the one that has to be asked for.
+
+    Read off the field rather than off an instance: the development stack sets
+    `CAMPUSID_LDAP_START_TLS=false` for a directory with no certificate, and an
+    instance built here would pick that up — which would make this assert what
+    the environment happens to say rather than what the code chooses.
+    """
+    assert Settings.model_fields["ldap_start_tls"].default is True
 
 
 def test_no_bind_credentials_are_committed() -> None:

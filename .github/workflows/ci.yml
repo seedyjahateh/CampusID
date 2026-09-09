@@ -116,6 +116,53 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.ci.yml \
             down -v --remove-orphans
 
+  directory:
+    name: LDAP against a real directory
+    runs-on: ubuntu-latest
+    # Its own job rather than a step in the federation one: a change to the SAML
+    # gate has no business waiting for a directory to start, and vice versa.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare environment file
+        run: cp .env.example .env
+
+      - name: Bring up the directory
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile directory up -d --build --wait --wait-timeout 300 \
+            postgres redis broker openldap
+
+      - name: Seed the tree
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile directory run --rm --build directory-init
+
+      # FR-DIR-01 asks that plaintext be blocked in CI. Asserted against the
+      # environment the tests actually run with, not against the file, because
+      # the file is not what the containers read.
+      - name: The plaintext escape hatch is not set for the broker
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            exec -T broker printenv CAMPUSID_LDAP_ALLOW_PLAINTEXT | grep -qx false
+
+      - name: Directory tests
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            run --rm tests tests/integration -m directory -v
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile directory logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            --profile directory down -v --remove-orphans
+
   federation:
     name: SSO against a real IdP
     runs-on: ubuntu-latest

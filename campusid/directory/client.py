@@ -46,9 +46,14 @@ that a revoked membership stops granting access within a coffee break."""
 
 CACHE_PREFIX: Final = "directory:groups:"
 
-CONNECT_TIMEOUT: Final = 5.0
+CONNECT_TIMEOUT: Final = 5
 """Seconds. A directory that is slow is, for a login, a directory that is down —
-and a login that hangs for the TCP default is worse than one that degrades."""
+and a login that hangs for the TCP default is worse than one that degrades.
+
+A whole number rather than a float: ldap3 packs the receive timeout into a
+`SO_RCVTIMEO` socket option, which refuses anything else with a message about
+an integer argument that names neither the option nor the value.
+"""
 
 
 class DirectoryUnavailable(Exception):
