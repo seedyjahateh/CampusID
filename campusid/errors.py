@@ -80,6 +80,12 @@ class ReasonCode(StrEnum):
     PKCE_REQUIRED = "pkce_required"
     PKCE_METHOD_UNSUPPORTED = "pkce_method_unsupported"
     PKCE_VERIFICATION_FAILED = "pkce_verification_failed"
+    GRANT_INVALID = "grant_invalid"
+    GRANT_REVOKED = "grant_revoked"
+    GRANT_REUSE_DETECTED = "grant_reuse_detected"
+    """The one code here that is a security event rather than a failed request:
+    a code or refresh token presented twice means one of the two presentations
+    was not the client."""
 
 
 NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset()
