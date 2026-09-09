@@ -44,6 +44,7 @@ from typing import Any, Final
 
 from redis.asyncio import Redis
 
+from campusid.cache import expire_key, set_add, set_members
 from campusid.errors import ReasonCode
 from campusid.oidc.errors import INVALID_GRANT, OAuthError
 from campusid.saml.stores import utcnow
@@ -53,6 +54,16 @@ CODE_SPENT_PREFIX: Final = "oidc:code:spent:"
 REFRESH_KEY_PREFIX: Final = "oidc:refresh:"
 REFRESH_SPENT_PREFIX: Final = "oidc:refresh:spent:"
 FAMILY_REVOKED_PREFIX: Final = "oidc:family:revoked:"
+
+SESSION_FAMILY_PREFIX: Final = "oidc:session-families:"
+"""Which token families a browser session produced.
+
+Written when a code is issued and read when the session ends. Without it,
+logging out would destroy the session and leave its access tokens
+introspectable and its refresh tokens rotating — a session that is gone from
+the broker's point of view but still worth something to whoever holds a token
+from it.
+"""
 
 CODE_TTL: Final = timedelta(seconds=60)
 """FR-OP-04. A code is redeemed by a server that already has the user's browser
@@ -169,6 +180,12 @@ class GrantStore:
             grant.to_json(),
             ex=_seconds(self._code_ttl),
         )
+        # Recorded here because this is the moment a browser session and a token
+        # family become connected. By logout time the connection is only
+        # recoverable from an index, and there is nowhere else to build one.
+        session_families = f"{SESSION_FAMILY_PREFIX}{grant.sid}"
+        await set_add(self._redis, session_families, grant.family_id)
+        await expire_key(self._redis, session_families, _seconds(self._refresh_ttl))
         return code
 
     async def redeem_code(
@@ -298,6 +315,21 @@ class GrantStore:
         await self._redis.set(
             f"{FAMILY_REVOKED_PREFIX}{family_id}", "1", ex=_seconds(self._refresh_ttl)
         )
+
+    async def revoke_session_families(self, sid: str) -> list[str]:
+        """Kill every token family a browser session produced (FR-SES-04).
+
+        The other half of logging out. Destroying the session already stops
+        `/userinfo`, which consults it; this is what stops an access token being
+        reported active by introspection and a refresh token rotating happily
+        against a session that no longer exists.
+        """
+        key = f"{SESSION_FAMILY_PREFIX}{sid}"
+        families = await set_members(self._redis, key)
+        for family_id in families:
+            await self.revoke_family(family_id)
+        await self._redis.delete(key)
+        return families
 
     async def is_family_revoked(self, family_id: str) -> bool:
         """Consulted on refresh, and by introspection, so a revoked family's

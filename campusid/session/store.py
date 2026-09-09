@@ -15,6 +15,7 @@ its own rather than accumulating.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from dataclasses import asdict, dataclass, field
@@ -23,9 +24,20 @@ from typing import Any, Final
 
 from redis.asyncio import Redis
 
+from campusid.cache import expire_key, set_add, set_members, set_remove
 from campusid.saml.stores import utcnow
 
 SESSION_KEY_PREFIX: Final = "session:"
+
+SUBJECT_INDEX_PREFIX: Final = "session:subject:"
+"""Maps a person to their live session ids, so an administrator can end all of
+them (FR-SES-05) without scanning every key in Redis.
+
+The index is keyed by a hash of the subject rather than by the subject itself. A
+`NameID` in a Redis key name would put an identifier from the IdP into every
+`KEYS` listing, every slow-log entry and every memory dump — none of which are
+places a person's identifier belongs, and none of which need it to be readable.
+"""
 
 IDLE_TIMEOUT: Final = timedelta(minutes=30)
 ABSOLUTE_TIMEOUT: Final = timedelta(hours=12)
@@ -193,7 +205,32 @@ class SessionStore:
 
     async def destroy(self, sid: str) -> None:
         """Delete a session. Immediate, because the state is server-side."""
+        raw = await self._redis.get(self._key(sid))
+        if raw is not None:
+            # Read before deleting so the subject index can be pruned. Leaving
+            # a dead sid in the index would make an administrator's "terminate
+            # everything" report successes for sessions that no longer exist,
+            # which is the wrong direction for that particular reassurance.
+            session = Session.from_json(raw)
+            await set_remove(self._redis, self._subject_key(session.subject_key), sid)
         await self._redis.delete(self._key(sid))
+
+    async def sids_for(self, subject_key: str) -> list[str]:
+        """Every live session id for one person (FR-SES-05)."""
+        return await set_members(self._redis, self._subject_key(subject_key))
+
+    async def terminate_subject(self, subject_key: str) -> list[str]:
+        """End every session this person has, returning the ids that were ended.
+
+        The ids are returned rather than swallowed because the caller has more
+        to do with them: back-channel logout has to reach the clients that hold
+        each one, and an audit record has to name them.
+        """
+        sids = await self.sids_for(subject_key)
+        for sid in sids:
+            await self.destroy(sid)
+        await self._redis.delete(self._subject_key(subject_key))
+        return sids
 
     async def _write(self, session: Session, *, now: datetime | None = None) -> None:
         now = now or utcnow()
@@ -204,8 +241,19 @@ class SessionStore:
         ttl = max(int(min(self._idle.total_seconds(), remaining)), 1)
         await self._redis.set(self._key(session.sid), session.to_json(), ex=ttl)
 
+        index = self._subject_key(session.subject_key)
+        await set_add(self._redis, index, session.sid)
+        # The index expires with the longest-lived session that could be in it.
+        # Without a TTL it would be the one structure here that grows forever,
+        # accumulating a member per login for the life of the deployment.
+        await expire_key(self._redis, index, max(int(self._absolute.total_seconds()), 1))
+
     def _key(self, sid: str) -> str:
         return f"{self._prefix}{sid}"
+
+    def _subject_key(self, subject_key: str) -> str:
+        digest = hashlib.sha256(subject_key.encode("utf-8")).hexdigest()
+        return f"{SUBJECT_INDEX_PREFIX}{digest}"
 
 
 def new_sid() -> str:

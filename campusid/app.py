@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 
 from campusid import __version__, health
@@ -19,9 +20,12 @@ from campusid.logging import configure_logging, get_logger
 from campusid.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
 from campusid.oidc import keys as oidc_keys
 from campusid.oidc.grants import GrantStore
+from campusid.oidc.logout import ClientSessionIndex, LogoutNotifier
+from campusid.oidc.par import PushedRequestStore
 from campusid.oidc.registry import ClientRegistry
 from campusid.policy.loader import PolicyStore
 from campusid.routes import disco as disco_routes
+from campusid.routes import logout as logout_routes
 from campusid.routes import oauth2 as oauth2_routes
 from campusid.routes import oidc as oidc_routes
 from campusid.routes import saml as saml_routes
@@ -101,6 +105,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.oidc_keys = oidc_keys.load_or_create_key_set(Path(settings.saml_key_dir))
     app.state.clients = ClientRegistry(session_factory)
     app.state.grants = GrantStore(redis)
+    app.state.pushed_requests = PushedRequestStore(redis)
+    app.state.client_sessions = ClientSessionIndex(redis)
+    # One client for the life of the process, so back-channel logout reuses
+    # connections rather than paying a TLS handshake per notification — and so
+    # a slow client cannot exhaust sockets by being notified often.
+    logout_http = httpx.AsyncClient()
+    app.state.logout_notifier = LogoutNotifier(issuer=settings.oidc_issuer, client=logout_http)
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
 
     log.info(
@@ -114,6 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         # Ordered teardown so in-flight requests drain before the pool closes
         # (NFR-AVAIL-06).
+        await logout_http.aclose()
         await redis.aclose()
         await engine.dispose()
         log.info("broker.shutdown")
@@ -152,5 +164,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(disco_routes.router)
     app.include_router(oidc_routes.router)
     app.include_router(oauth2_routes.router)
+    app.include_router(logout_routes.router)
 
     return app

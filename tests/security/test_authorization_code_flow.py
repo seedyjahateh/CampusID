@@ -29,6 +29,7 @@ from campusid.oidc.errors import OAuthError
 from campusid.oidc.grants import GrantStore
 from campusid.oidc.jwt import b64url_decode
 from campusid.oidc.keys import KeySet
+from campusid.oidc.logout import ClientSessionIndex
 from campusid.oidc.pkce import compute_challenge
 from campusid.policy.attributes import DISPLAY_NAME, EPPN, MAIL, SCOPED_AFFILIATION
 from campusid.policy.release import ReleasePolicy, ReleaseRule
@@ -137,6 +138,7 @@ def wired(
     app.state.redis = redis
     app.state.grants = GrantStore(redis)
     app.state.sessions = SessionStore(redis)
+    app.state.client_sessions = ClientSessionIndex(redis)
     app.state.clients = _Clients(confidential, public_client)
     app.state.policies = _Policies(policy)
     app.state.oidc_keys = oidc_key_set

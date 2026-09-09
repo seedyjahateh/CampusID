@@ -120,6 +120,17 @@ async def authorize(
         if stashed is None:
             return reject(ReasonCode.GRANT_INVALID, "the authorization request expired", reference)
         parameters = stashed
+    elif request_uri is not None:
+        # A pushed request (FR-OP-07). Everything comes from the record the
+        # client authenticated to create; the rest of the query is ignored
+        # entirely, because a parameter that could be overridden here would
+        # undo the point of pushing the request in the first place.
+        pushed = await app_state.pushed_requests.consume(request_uri, client_id=client_id or "")
+        if pushed is None:
+            return reject(
+                ReasonCode.GRANT_INVALID, "the request_uri is unknown, spent or expired", reference
+            )
+        parameters = {**pushed, "client_id": client_id, "pushed": True}
     else:
         parameters = {
             "client_id": client_id,
@@ -130,7 +141,12 @@ async def authorize(
             "nonce": nonce,
             "code_challenge": code_challenge,
             "code_challenge_method": code_challenge_method,
-            "request_uri": request_uri,
+            # Records how the request arrived rather than whether a parameter
+            # was present. A client configured for mandatory PAR is checked
+            # against this, and the record a PAR client pushed does not itself
+            # contain a `request_uri` — so testing for the parameter would
+            # reject exactly the clients the setting is meant to protect.
+            "pushed": False,
         }
 
     # Phase one: everything needed before there is a safe place to send errors.
@@ -182,7 +198,7 @@ def _check_authorization_request(client: OidcClient, parameters: dict[str, Any])
     pkce.assert_valid_challenge(parameters.get("code_challenge"))
     client.granted_scopes(parameters.get("scope"))
 
-    if client.require_pushed_authorization_requests and not parameters.get("request_uri"):
+    if client.require_pushed_authorization_requests and not parameters.get("pushed"):
         raise OAuthError(
             INVALID_REQUEST,
             ReasonCode.GRANT_INVALID,
@@ -224,7 +240,76 @@ async def _issue_code(
             amr=session.amr,
         )
     )
+    # The only moment we learn that this client now holds a session for this
+    # person. By logout time it is unrecoverable from anything else, so it is
+    # recorded here rather than inferred later (FR-OP-12).
+    await request.app.state.client_sessions.record(session.sid, client.client_id)
     return code
+
+
+# --- pushed authorization requests (FR-OP-07) ------------------------------
+
+
+@router.post("/oauth2/par")
+async def pushed_authorization_request(
+    request: Request,
+    response_type: Annotated[str | None, Form()] = None,
+    redirect_uri: Annotated[str | None, Form()] = None,
+    scope: Annotated[str | None, Form()] = None,
+    state: Annotated[str | None, Form()] = None,
+    nonce: Annotated[str | None, Form()] = None,
+    code_challenge: Annotated[str | None, Form()] = None,
+    code_challenge_method: Annotated[str | None, Form()] = None,
+    request_uri: Annotated[str | None, Form()] = None,
+    client_id: Annotated[str | None, Form()] = None,
+    client_secret: Annotated[str | None, Form()] = None,
+) -> Response:
+    """Accept an authorization request directly from a client (RFC 9126).
+
+    The request is validated here, where the client is authenticated and can be
+    told what is wrong, rather than at the redirect where the only audience is a
+    browser. That is most of the value: a client integrating against this
+    endpoint gets a 400 with a reason instead of a user seeing an error page.
+    """
+    state_ = request.app.state
+    try:
+        client = await _authenticated_client(request, client_id, client_secret)
+        if request_uri is not None:
+            # RFC 9126 §2.1. A pushed request that pushes a reference is either
+            # confused or an attempt to make us dereference something; either
+            # way there is no sensible meaning to give it.
+            raise OAuthError(
+                INVALID_REQUEST,
+                ReasonCode.GRANT_INVALID,
+                "request_uri is not accepted at this endpoint",
+            )
+
+        parameters: dict[str, Any] = {
+            "client_id": client.client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": response_type,
+            "scope": scope,
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "pushed": True,
+        }
+        # Validated now rather than at redemption. The redirect URI check comes
+        # first for the same reason as at the authorization endpoint: nothing
+        # else is meaningful until we know where this would send somebody.
+        client.validated_redirect_uri(redirect_uri)
+        _check_authorization_request(client, parameters)
+    except OAuthError as exc:
+        return _token_error(exc)
+
+    reference, expires_in = await state_.pushed_requests.push(client.client_id, parameters)
+    log.info("oidc.par.pushed", client_id=client.client_id)
+    return JSONResponse(
+        {"request_uri": reference, "expires_in": expires_in},
+        status_code=201,
+        headers=NO_STORE,
+    )
 
 
 # --- the token endpoint ----------------------------------------------------
