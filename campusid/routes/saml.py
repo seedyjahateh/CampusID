@@ -27,12 +27,15 @@ import binascii
 import secrets
 from datetime import timedelta
 from typing import Annotated, Final
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from campusid.errors import BrokerError, ReasonCode, SamlRejected
 from campusid.logging import get_logger
+from campusid.routes.errors import correlation_id as new_correlation_id
+from campusid.routes.errors import reject
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
 from campusid.saml.stores import OutstandingRequest, utcnow
 from campusid.session.cookies import (
@@ -49,13 +52,6 @@ router = APIRouter(tags=["saml"])
 
 REQUEST_TTL: Final = timedelta(minutes=5)
 BINDING_KEY_PREFIX: Final = "saml:binding:"
-
-ERROR_PAGE: Final = """<!doctype html>
-<title>Sign-in failed</title>
-<h1>Sign-in failed</h1>
-<p>We could not complete your sign-in. Please try again.</p>
-<p>If you contact support, quote reference <code>{correlation_id}</code>.</p>
-"""
 
 
 @router.get("/saml/metadata")
@@ -78,11 +74,15 @@ async def start_sso(request: Request, idp: str | None = None) -> Response:
     state = request.app.state
     entity_id = idp or state.settings.saml_default_idp
     if entity_id is None:
-        return _reject(ReasonCode.UNKNOWN_ISSUER, "no IdP named and no default configured")
+        # Nobody named an IdP and there is no default, so ask. Discovery sends
+        # the browser back here with `?idp=`, which is why `returnIDParam` is
+        # `idp` rather than the protocol's `entityID` default.
+        query = urlencode({"return": state.settings.saml_sso_url, "returnIDParam": "idp"})
+        return RedirectResponse(f"/disco?{query}", status_code=303)
 
     descriptor = await state.registry.describe(entity_id)
     if descriptor is None:
-        return _reject(ReasonCode.UNKNOWN_ISSUER, f"{entity_id!r} is not a registered IdP")
+        return reject(ReasonCode.UNKNOWN_ISSUER, f"{entity_id!r} is not a registered IdP")
 
     prepared = prepare_redirect(
         AuthnRequestPolicy(
@@ -124,7 +124,7 @@ async def assertion_consumer_service(
 ) -> Response:
     """Receive a SAML Response and, if it survives the gate, start a session."""
     state = request.app.state
-    correlation_id = _correlation_id()
+    correlation_id = new_correlation_id()
 
     # Every failure from here is a `BrokerError`, so there is one rejection
     # path rather than three shapes of it — which is what makes the uniform
@@ -134,7 +134,7 @@ async def assertion_consumer_service(
         document = _decode(SAMLResponse)
         facts = await state.gate.validate(document)
     except BrokerError as exc:
-        return _reject(exc.reason, exc.detail or "", correlation_id)
+        return reject(exc.reason, exc.detail or "", correlation_id)
 
     session = await state.sessions.create(
         idp_entity_id=facts.issuer,
@@ -221,22 +221,3 @@ def _decode(encoded: str) -> bytes:
         raise SamlRejected(
             ReasonCode.MALFORMED_RESPONSE, "SAMLResponse is not valid base64"
         ) from exc
-
-
-def _correlation_id() -> str:
-    return secrets.token_hex(8)
-
-
-def _reject(reason: ReasonCode, detail: str, correlation_id: str | None = None) -> Response:
-    """Audit the reason, show the user a page that reveals none of it.
-
-    Same status and same body for every failure: varying the response by reason
-    would let an attacker enumerate the gate's checks by observation.
-    """
-    correlation_id = correlation_id or _correlation_id()
-    log.warning("saml.rejected", reason=reason.value, detail=detail, correlation_id=correlation_id)
-    return HTMLResponse(
-        ERROR_PAGE.format(correlation_id=correlation_id),
-        status_code=400,
-        headers={"Cache-Control": "no-store"},
-    )

@@ -9,9 +9,10 @@ OIDC provider, provisions and deprovisions accounts from a mock SIS over SCIM
 RBAC/ABAC with step-up MFA — logging every authentication, authorization, and
 attribute-release decision.
 
-**Status: M1a complete.** A browser can sign in against a real Keycloak IdP and
-land in a broker session, through a validation gate that rejects expired,
-misaddressed, replayed and signature-wrapped assertions. Full specification:
+**Status: M1 complete.** A browser picks an institution, signs in against one of
+two real Keycloak IdPs, and lands in a broker session — through a validation
+gate that rejects expired, misaddressed, replayed, wrapped and
+comment-spliced assertions, and decrypts encrypted ones. Full specification:
 [`docs/PRD.md`](docs/PRD.md).
 
 ## Quickstart
@@ -37,8 +38,17 @@ the broker's descriptor to Keycloak (creating the SAML client, pinning the
 attributes Keycloak gets wrong by default, and installing the eduPerson
 mappers) and registers Keycloak's descriptor with the broker.
 
-Then open <http://localhost:8000/saml/sso> and sign in as `sam.obrien` /
-`campus-dev-password`. You land on `/me` with the released attributes.
+Then open <http://localhost:8000/disco>, pick an institution, and sign in:
+
+| Institution | User | Password |
+|---|---|---|
+| Campus University | `sam.obrien` | `campus-dev-password` |
+| Partner College | `priya.nair` | `partner-dev-password` |
+
+You land on `/me` with the released eduPerson attributes. Two Keycloak realms
+stand in for two federation partners: each is its own SAML entity with its own
+entityID and signing key, so the broker really does have to choose a
+certificate by issuer.
 
 The exchange is automated rather than pre-baked because the Keycloak client
 must carry the broker's signing certificate, and the broker generates its
@@ -72,8 +82,7 @@ that reproduces the quickstart on a clean runner.
 | Milestone | Scope | Status |
 |---|---|---|
 | M0 | Repo scaffold, data tier, migrations, CI | ✅ Complete |
-| M1a | Keycloak IdP, SAML SP with the full assertion validation gate, federation registry, sessions | ✅ Complete |
-| M1b | SimpleSAMLphp second IdP, discovery service, encrypted assertions | Next |
+| M1 | SAML SP with the full assertion validation gate, two IdPs, discovery, federation registry, sessions, encrypted assertions | ✅ Complete |
 | M2 | Attribute release policy, OIDC provider, dual-protocol sample app | |
 | M3 | SCIM 2.0 provisioning, joiner/mover/leaver lifecycle | |
 | M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA | |

@@ -112,7 +112,11 @@ services:
       KC_HEALTH_ENABLED: "true"
       TZ: UTC
     volumes:
+      # Two realms, so the broker has two genuinely distinct IdPs to discover
+      # between: each realm is its own SAML entity with its own entityID and
+      # its own signing key.
       - ./docker/keycloak/realm-campus.json:/opt/keycloak/data/import/realm-campus.json:ro
+      - ./docker/keycloak/realm-partner.json:/opt/keycloak/data/import/realm-partner.json:ro
     ports:
       - "${KEYCLOAK_PORT:-18080}:8080"
     networks: [internal]
@@ -130,7 +134,7 @@ services:
       <<: *broker-env
       FEDERATION_BROKER_URL: http://broker:8000
       FEDERATION_KEYCLOAK_URL: http://keycloak:8080
-      FEDERATION_KEYCLOAK_REALM: campus
+      FEDERATION_KEYCLOAK_REALMS: campus,partner
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
     depends_on:

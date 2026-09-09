@@ -139,6 +139,10 @@ class Settings(BaseSettings):
         return f"{self.base_url}/saml/acs"
 
     @property
+    def saml_sso_url(self) -> str:
+        return f"{self.base_url}/saml/sso"
+
+    @property
     def saml_slo_url(self) -> str:
         return f"{self.base_url}/saml/sls"
 

@@ -1,0 +1,32 @@
+{
+  "realm": "partner",
+  "displayName": "Partner College IdP",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+
+  "users": [
+    {
+      "username": "priya.nair",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Priya",
+      "lastName": "Nair",
+      "email": "priya.nair@partner.edu",
+      "credentials": [
+        { "type": "password", "value": "partner-dev-password", "temporary": false }
+      ],
+      "attributes": {
+        "eduPersonPrincipalName": ["priya.nair@partner.edu"],
+        "eduPersonScopedAffiliation": ["faculty@partner.edu", "member@partner.edu"],
+        "eduPersonPrimaryAffiliation": ["faculty"],
+        "displayName": ["Priya Nair"],
+        "ou": ["MATH"]
+      }
+    }
+  ]
+}

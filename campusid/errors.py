@@ -67,6 +67,9 @@ class ReasonCode(StrEnum):
     METADATA_INVALID = "metadata_invalid"
     METADATA_EXPIRED = "metadata_expired"
 
+    # --- Discovery ---------------------------------------------------------
+    INVALID_RETURN_URL = "invalid_return_url"
+
 
 NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset()
 """Codes with no reachable code path yet, exempt from the completeness test.

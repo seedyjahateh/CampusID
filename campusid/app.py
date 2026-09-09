@@ -17,6 +17,7 @@ from campusid.federation.registry import FederationRegistry
 from campusid.keys import load_or_create
 from campusid.logging import configure_logging, get_logger
 from campusid.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
+from campusid.routes import disco as disco_routes
 from campusid.routes import saml as saml_routes
 from campusid.saml.gate import AssertionGate, GatePolicy
 from campusid.saml.metadata_sp import (
@@ -134,5 +135,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(health.router)
     app.include_router(saml_routes.router)
+    app.include_router(disco_routes.router)
 
     return app
