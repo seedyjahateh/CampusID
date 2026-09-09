@@ -19,12 +19,15 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from campusid.scim.auth import SCOPE_READ, SCOPE_WRITE, challenge, require_scope
+from campusid.scim.bulk import parse_bulk
+from campusid.scim.bulk_runner import BulkRunner, payload_too_large
 from campusid.scim.errors import ScimError, ScimType, invalid_filter, not_found
 from campusid.scim.filters import ScimFilterError, parse_filter
 from campusid.scim.patch import PatchError, apply_patch, parse_operations
 from campusid.scim.resources import from_scim
 from campusid.scim.schemas import (
     LIST_RESPONSE,
+    MAX_BULK_PAYLOAD,
     resource_types,
     schemas,
     service_provider_config,
@@ -421,6 +424,53 @@ async def delete_group(request: Request, group_id: str) -> Response:
         return _error(exc)
 
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+# --- /Bulk ------------------------------------------------------------------
+
+
+@router.post("/scim/v2/Bulk")
+async def bulk(request: Request) -> JSONResponse:
+    """Apply up to a hundred changes in one request (FR-SCIM-10).
+
+    Requires `scim:write` regardless of what the operations turn out to be. A
+    bulk request whose scope depended on its contents would need parsing before
+    it could be authorised, and a parser is not where an authorisation decision
+    belongs.
+
+    The response is a 200 even when operations inside it failed: the *request*
+    succeeded, and each operation carries its own status. A client reads the
+    entries, not the envelope.
+    """
+    try:
+        await require_scope(request, SCOPE_WRITE)
+        body = await _bulk_body(request)
+        parsed = parse_bulk(body)
+        runner = BulkRunner(
+            request.app.state.scim_users,
+            request.app.state.scim_groups,
+            issuer=request.app.state.settings.oidc_issuer,
+        )
+        response = await runner.run(parsed)
+    except ScimError as exc:
+        return _error(exc)
+
+    return JSONResponse(
+        response, media_type=SCIM_CONTENT_TYPE, headers={"Cache-Control": "no-store"}
+    )
+
+
+async def _bulk_body(request: Request) -> dict[str, Any]:
+    """Read the body, refusing one larger than discovery advertises.
+
+    Measured before parsing. A megabyte of JSON costs the same to parse whether
+    or not we were going to accept it, and the point of the limit is not to
+    spend that.
+    """
+    raw = await request.body()
+    if len(raw) > MAX_BULK_PAYLOAD:
+        raise payload_too_large(MAX_BULK_PAYLOAD)
+    return await _body(request)
 
 
 # --- request helpers --------------------------------------------------------
