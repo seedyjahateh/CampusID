@@ -34,6 +34,7 @@ from campusid.routes import logout as logout_routes
 from campusid.routes import oauth2 as oauth2_routes
 from campusid.routes import oidc as oidc_routes
 from campusid.routes import saml as saml_routes
+from campusid.routes import scim as scim_routes
 from campusid.saml.gate import AssertionGate, GatePolicy
 from campusid.saml.metadata_sp import (
     DEFAULT_REQUESTED_ATTRIBUTES,
@@ -175,5 +176,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(oidc_routes.router)
     app.include_router(oauth2_routes.router)
     app.include_router(logout_routes.router)
+    app.include_router(scim_routes.router)
 
     return app
