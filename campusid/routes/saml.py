@@ -26,7 +26,7 @@ import base64
 import binascii
 import secrets
 from datetime import timedelta
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, Request, Response
@@ -36,9 +36,12 @@ from campusid.audit.events import EventType, Outcome
 from campusid.audit.log import correlation_id as audit_correlation_id
 from campusid.audit.log import set_correlation_id
 from campusid.errors import BrokerError, ReasonCode, SamlRejected
+from campusid.identity.assertions import from_saml
+from campusid.identity.registry import STATUS_ACTIVE
 from campusid.logging import get_logger
 from campusid.routes.errors import reject
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
+from campusid.saml.gate import AssertionFacts
 from campusid.saml.stores import OutstandingRequest, utcnow
 from campusid.session.cookies import (
     REQUEST_BINDING_COOKIE,
@@ -206,6 +209,22 @@ async def assertion_consumer_service(
         set_correlation_id(facts.correlation_id)
         reference = facts.correlation_id
 
+    # Who this is, before there is a session to attach it to. A session for a
+    # person the registry will not name is a session nothing can later revoke:
+    # deprovisioning works by person, so an unresolved login would be
+    # unreachable by every later lifecycle action.
+    try:
+        person_uuid = await _resolve_person(state, facts)
+    except BrokerError as exc:
+        await state.audit.record(
+            EventType.AUTH_FAILURE,
+            Outcome.FAILURE,
+            reason=exc.reason.value,
+            target=facts.issuer,
+            **_provenance(request),
+        )
+        return reject(exc.reason, exc.detail or "", reference)
+
     session = await state.sessions.create(
         idp_entity_id=facts.issuer,
         name_id=facts.name_id,
@@ -215,6 +234,7 @@ async def assertion_consumer_service(
         amr=("pwd",),
         session_index=facts.session_index,
         attributes=facts.attributes,
+        person_uuid=person_uuid,
     )
     await state.audit.record(
         EventType.AUTH_SUCCESS,
@@ -246,6 +266,32 @@ async def assertion_consumer_service(
     set_session_cookie(response, session.sid)
     clear_request_binding_cookie(response)
     return response
+
+
+async def _resolve_person(state: Any, facts: AssertionFacts) -> str:
+    """Match a validated assertion to a person, or refuse the login.
+
+    Two refusals, and they are different failures. A manual-review outcome means
+    the assertion matched somebody on an email address and nothing stronger;
+    linking on that is the account takeover PRD §8.4 rule 4 declines to perform,
+    so a human decides. A suspended person means the upstream IdP will still
+    happily authenticate them and our deprovisioning is what stops them — which
+    is the entire point of holding identity here rather than at the IdP.
+    """
+    resolution = await state.identity.resolve(
+        from_saml(facts.issuer, facts.name_id, facts.attributes)
+    )
+    if not resolution.linked:
+        raise BrokerError(
+            ReasonCode.IDENTITY_REVIEW_REQUIRED,
+            f"{facts.issuer} asserted somebody who needs manual linking",
+        )
+
+    person_uuid = str(resolution.person_uuid)
+    person = await state.identity.get(person_uuid)
+    if person is not None and person.status != STATUS_ACTIVE:
+        raise BrokerError(ReasonCode.IDENTITY_SUSPENDED, f"person {person_uuid} is {person.status}")
+    return person_uuid
 
 
 @router.get("/me")

@@ -16,6 +16,7 @@ from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
 from campusid.federation.registry import FederationRegistry
+from campusid.identity.registry import IdentityRegistry
 from campusid.keys import load_or_create
 from campusid.lifecycle.rules import RulesStore
 from campusid.lifecycle.store import LifecycleStore
@@ -125,6 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
     app.state.lifecycle_rules = RulesStore(Path(settings.lifecycle_rules_file))
     app.state.lifecycle = LifecycleStore(session_factory)
+    app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
     app.state.scim_users = UserStore(
         session_factory, issuer=settings.oidc_issuer, scope=settings.scope

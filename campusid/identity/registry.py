@@ -277,8 +277,14 @@ class IdentityRegistry:
                 )
             )
 
-        if assertion.eppn:
-            await self._claim_eppn(session, person, assertion.eppn, now)
+        # Everybody gets a principal name, including somebody whose IdP asserted
+        # none. A person without one cannot be named in SCIM, where `userName` is
+        # required, and cannot be released to an SP that asks for `eduPersonPrincipalName` —
+        # so "the IdP sent no ePPN" would become "this person is invisible to
+        # half the system". When there is nothing to base one on, it is derived
+        # from the `eduPersonUniqueId` we have just minted, which is ours and
+        # unique by construction.
+        await self._claim_eppn(session, person, assertion.eppn or person.edu_person_unique_id, now)
 
         if assertion.mail and not await self._identifier_taken(
             session, ID_MAIL, assertion.mail.lower()

@@ -678,31 +678,34 @@ async def test_pagination_does_not_overlap_or_skip(
     http: httpx.AsyncClient, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
     """`startIndex` is 1-based (§3.4.2.4). Zero-based would make a client's
-    second page overlap its first by one person."""
+    second page overlap its first by one person.
+
+    Walks the whole collection rather than assuming the people this test made
+    are the only ones in it. They are not: fixture users and anybody a login test
+    created are here too, and a test that assumed an empty directory would pass
+    only until the suite grew.
+    """
     created = [await _create(http) for _ in range(5)]
     known = {person["id"] for person in created}
 
-    first = (
-        await http.get(
-            "/scim/v2/Users",
-            params={"startIndex": 1, "count": 3, "sortBy": "id"},
-            headers=await _headers(http),
-        )
-    ).json()
-    second = (
-        await http.get(
-            "/scim/v2/Users",
-            params={"startIndex": 4, "count": 3, "sortBy": "id"},
-            headers=await _headers(http),
-        )
-    ).json()
+    seen: list[str] = []
+    start = 1
+    while True:
+        page = (
+            await http.get(
+                "/scim/v2/Users",
+                params={"startIndex": start, "count": 3, "sortBy": "id"},
+                headers=await _headers(http),
+            )
+        ).json()
+        ids = [resource["id"] for resource in page["Resources"]]
+        assert not set(ids) & set(seen), "pages must not overlap"
+        seen.extend(ids)
+        if len(seen) >= page["totalResults"] or not ids:
+            break
+        start += 3
 
-    page_one = [r["id"] for r in first["Resources"]]
-    page_two = [r["id"] for r in second["Resources"]]
-    assert not set(page_one) & set(page_two)
-    assert known <= set(page_one) | set(page_two) | {
-        r["id"] for r in first["Resources"] + second["Resources"]
-    }
+    assert known <= set(seen), "paging skipped somebody"
 
 
 async def test_sorting_is_honoured(

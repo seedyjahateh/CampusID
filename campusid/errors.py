@@ -70,6 +70,16 @@ class ReasonCode(StrEnum):
     # --- Discovery ---------------------------------------------------------
     INVALID_RETURN_URL = "invalid_return_url"
 
+    # --- Identity resolution (PRD §8.4) -------------------------------------
+    IDENTITY_REVIEW_REQUIRED = "identity_review_required"
+    """The assertion matched a person on an email address and nothing stronger.
+    A link on that evidence is an account takeover, so the login is refused and
+    a human decides — see `campusid/identity/registry.py` rule 4."""
+
+    IDENTITY_SUSPENDED = "identity_suspended"
+    """The person exists and is no longer entitled to a session. The upstream IdP
+    may still authenticate them; deprovisioning here is what stops them."""
+
     # --- OIDC provider ------------------------------------------------------
     # These are the internal half of a two-vocabulary scheme: the client is told
     # a coarse OAuth `error`, while the audit trail records which of these it

@@ -64,16 +64,29 @@ class Session:
     amr: tuple[str, ...] = ()
     session_index: str | None = None
     attributes: dict[str, list[str]] = field(default_factory=dict)
+    person_uuid: str | None = None
+    """Who this is, once the identity registry has said so.
+
+    Optional only because a session may predate the resolution — a stored
+    session written before this field existed still loads. Every session
+    established after M3 carries one.
+    """
 
     @property
     def subject_key(self) -> str:
-        """How this browser's user is identified for now.
+        """How this browser's user is identified.
 
-        The pair of issuing IdP and `NameID`, because a `NameID` is only
-        meaningful within the IdP that minted it. M3 replaces this with a
-        `person_uuid` once the identity registry exists to allocate one.
+        The `person_uuid` when there is one, because that is what makes "end
+        every session this person has" mean every session rather than every
+        session from one IdP. Somebody who logged in through the campus IdP and
+        again through a partner has two subjects under the older key and one
+        under this one, and a deprovisioning that ended only half of them would
+        be the failure FR-LC-03 exists to prevent.
+
+        The IdP-and-`NameID` pair remains the fallback: a `NameID` is meaningful
+        only within the IdP that minted it, so the two parts are never separated.
         """
-        return f"{self.idp_entity_id}|{self.name_id}"
+        return self.person_uuid or f"{self.idp_entity_id}|{self.name_id}"
 
     def to_json(self) -> str:
         payload = asdict(self)
@@ -118,6 +131,7 @@ class SessionStore:
         amr: tuple[str, ...] = (),
         session_index: str | None = None,
         attributes: dict[str, list[str]] | None = None,
+        person_uuid: str | None = None,
         now: datetime | None = None,
     ) -> Session:
         """Start a session and return it."""
@@ -135,6 +149,7 @@ class SessionStore:
             amr=amr,
             session_index=session_index,
             attributes=attributes or {},
+            person_uuid=person_uuid,
         )
         await self._write(session)
         return session
