@@ -11,13 +11,18 @@ import httpx
 from fastapi import FastAPI
 
 from campusid import __version__, health
+from campusid.audit.log import AuditLog
 from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
 from campusid.federation.registry import FederationRegistry
 from campusid.keys import load_or_create
 from campusid.logging import configure_logging, get_logger
-from campusid.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
+from campusid.middleware import (
+    BodySizeLimitMiddleware,
+    CorrelationMiddleware,
+    SecurityHeadersMiddleware,
+)
 from campusid.oidc import keys as oidc_keys
 from campusid.oidc.grants import GrantStore
 from campusid.oidc.logout import ClientSessionIndex, LogoutNotifier
@@ -113,6 +118,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logout_http = httpx.AsyncClient()
     app.state.logout_notifier = LogoutNotifier(issuer=settings.oidc_issuer, client=logout_http)
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
+    app.state.audit = AuditLog(session_factory)
 
     log.info(
         "broker.startup",
@@ -159,6 +165,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Outermost, so the body cap applies before anything buffers the form.
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    # Innermost of the three, so the correlation id is set before any handler
+    # runs and cleared after the last one — including for a request the body cap
+    # rejects, which is itself worth a correlated record.
+    app.add_middleware(CorrelationMiddleware)
     app.include_router(health.router)
     app.include_router(saml_routes.router)
     app.include_router(disco_routes.router)

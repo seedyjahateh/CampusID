@@ -13,7 +13,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from structlog.contextvars import bind_contextvars, clear_contextvars
 
+from campusid.audit.log import new_correlation_id, set_correlation_id
 from campusid.saml.parser import MAX_DOCUMENT_BYTES
 
 SECURITY_HEADERS: dict[str, str] = {
@@ -78,6 +80,46 @@ class BodySizeLimitMiddleware:
             await send(message)
 
         await self.app(scope, counting_receive, guarded_send)
+
+
+class CorrelationMiddleware(BaseHTTPMiddleware):
+    """Give every request a correlation id, and bind it to the logs (FR-AUD-02).
+
+    One id per request, shared by every audit event the request produces, so an
+    investigator pulls the whole chain — authorization request, upstream SSO,
+    attribute release, token issuance — with one query rather than reconstructing
+    it from timestamps.
+
+    Set here rather than passed down through call signatures: a parameter
+    threaded through fifteen functions is one somebody forgets at the sixteenth,
+    and an event with no correlation id is present but unjoinable.
+
+    An inbound `X-Correlation-ID` is deliberately **not** honoured. It would let
+    a caller merge their requests into somebody else's chain, or flood one id
+    until the trail for it is unreadable — and the broker is not behind a trusted
+    mesh that would have set one.
+    """
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        reference = new_correlation_id()
+        set_correlation_id(reference)
+        bind_contextvars(correlation_id=reference)
+        try:
+            response = await call_next(request)
+        finally:
+            # Cleared even on an exception: contextvars outlive the request in a
+            # worker, and a leaked id would silently attribute the next
+            # request's events to this one's chain.
+            clear_contextvars()
+
+        # Echoed so a user quoting the reference on the error page and an
+        # operator reading a proxy log are talking about the same request.
+        response.headers.setdefault("X-Correlation-ID", reference)
+        return response
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):

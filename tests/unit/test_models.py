@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+# Imported for their side effect: each registers its tables on the shared
+# `metadata` this file asserts against.
+import campusid.audit.models
 import campusid.federation.models
-import campusid.oidc.models  # noqa: F401 - registers tables on `metadata`
+import campusid.oidc.models  # noqa: F401
 from campusid.models import Base, metadata
 
 
@@ -33,7 +36,7 @@ def test_declared_tables_match_the_migrations() -> None:
     deploy time. The identity registry (`person`, `account`, `identifier`)
     joins this set in M3.
     """
-    assert set(metadata.tables) == {"federation_entity", "oidc_client"}
+    assert set(metadata.tables) == {"federation_entity", "oidc_client", "audit_event"}
 
 
 def test_constraint_names_follow_the_convention() -> None:

@@ -32,9 +32,11 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from campusid.audit.events import EventType, Outcome
+from campusid.audit.log import correlation_id as audit_correlation_id
+from campusid.audit.log import set_correlation_id
 from campusid.errors import BrokerError, ReasonCode, SamlRejected
 from campusid.logging import get_logger
-from campusid.routes.errors import correlation_id as new_correlation_id
 from campusid.routes.errors import reject
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
 from campusid.saml.stores import OutstandingRequest, utcnow
@@ -138,6 +140,7 @@ async def start_sso(
             relay_state=prepared.relay_state,
             created_at=utcnow(),
             return_to=destination,
+            correlation_id=audit_correlation_id(),
         ),
         ttl=REQUEST_TTL,
     )
@@ -151,6 +154,16 @@ async def start_sso(
 
     response = RedirectResponse(prepared.redirect_url, status_code=303)
     set_request_binding_cookie(response, binding_nonce)
+    # The first link in the chain FR-AUD-02 asks for. It names no subject
+    # because at this point nobody has authenticated — the correlation id is
+    # what joins it to the events that will.
+    await state.audit.record(
+        EventType.AUTH_REQUEST,
+        Outcome.SUCCESS,
+        target=descriptor.entity_id,
+        detail={"request_id": prepared.request_id, "protocol": "saml"},
+        **_provenance(request),
+    )
     log.info("saml.authn_request.sent", idp=descriptor.entity_id, request_id=prepared.request_id)
     return response
 
@@ -163,7 +176,7 @@ async def assertion_consumer_service(
 ) -> Response:
     """Receive a SAML Response and, if it survives the gate, start a session."""
     state = request.app.state
-    correlation_id = new_correlation_id()
+    reference = audit_correlation_id()
 
     # Every failure from here is a `BrokerError`, so there is one rejection
     # path rather than three shapes of it — which is what makes the uniform
@@ -173,7 +186,25 @@ async def assertion_consumer_service(
         document = _decode(SAMLResponse)
         facts = await state.gate.validate(document)
     except BrokerError as exc:
-        return reject(exc.reason, exc.detail or "", correlation_id)
+        # The audit record carries the reason code the browser is not told. That
+        # asymmetry is the point: an attacker learns nothing, and an operator
+        # searching the trail for the reference on the error page finds exactly
+        # which of the fifteen checks refused it.
+        await state.audit.record(
+            EventType.AUTH_FAILURE,
+            Outcome.FAILURE,
+            reason=exc.reason.value,
+            **_provenance(request),
+        )
+        return reject(exc.reason, exc.detail or "", reference)
+
+    if facts.correlation_id:
+        # Rejoin the chain this login started in (FR-AUD-02). The id came off
+        # the outstanding request, which only our own `/saml/sso` writes — an
+        # id taken from the response would let an issuer merge its logins into
+        # somebody else's chain.
+        set_correlation_id(facts.correlation_id)
+        reference = facts.correlation_id
 
     session = await state.sessions.create(
         idp_entity_id=facts.issuer,
@@ -185,11 +216,30 @@ async def assertion_consumer_service(
         session_index=facts.session_index,
         attributes=facts.attributes,
     )
+    await state.audit.record(
+        EventType.AUTH_SUCCESS,
+        Outcome.SUCCESS,
+        actor=session.subject_key,
+        subject=session.subject_key,
+        target=facts.issuer,
+        session_id=session.sid,
+        detail={"acr": facts.authn_context, "attributes": facts.attributes},
+        **_provenance(request),
+    )
+    await state.audit.record(
+        EventType.SESSION_CREATED,
+        Outcome.SUCCESS,
+        actor=session.subject_key,
+        subject=session.subject_key,
+        target=facts.issuer,
+        session_id=session.sid,
+        **_provenance(request),
+    )
     log.info(
         "session.established",
         idp=facts.issuer,
         acr=facts.authn_context,
-        correlation_id=correlation_id,
+        correlation_id=reference,
     )
 
     response = RedirectResponse(facts.return_to or DEFAULT_LANDING, status_code=303)
@@ -224,6 +274,21 @@ async def whoami(request: Request) -> Response:
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _provenance(request: Request) -> dict[str, str | None]:
+    """Where a request came from, for the audit record (FR-AUD-01).
+
+    `client.host` is the peer we are actually talking to, not an
+    `X-Forwarded-For` header. Behind a proxy that is the proxy's address, which
+    is honest — a forwarded header is attacker-controlled unless the proxy chain
+    is known and trusted, and recording an attacker's chosen IP as fact is worse
+    than recording the hop we can see.
+    """
+    return {
+        "source_ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent", "")[:512] or None,
+    }
 
 
 def _binding_key(relay_state: str) -> str:

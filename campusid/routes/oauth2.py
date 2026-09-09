@@ -36,6 +36,9 @@ from urllib.parse import unquote, urlencode
 from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from campusid.audit.events import EventType, Outcome
+from campusid.audit.log import correlation_id as audit_correlation_id
+from campusid.audit.log import set_correlation_id
 from campusid.errors import BrokerError, ReasonCode
 from campusid.logging import get_logger
 from campusid.oidc import bearer, pkce
@@ -54,7 +57,7 @@ from campusid.oidc.grants import (
     RefreshToken,
     new_family_id,
 )
-from campusid.oidc.identity import release_to
+from campusid.oidc.identity import ReleasedIdentity, release_to
 from campusid.oidc.jwt import SigningKey
 from campusid.oidc.tokens import (
     ACCESS_TOKEN_TTL,
@@ -62,7 +65,6 @@ from campusid.oidc.tokens import (
     access_token,
     id_token,
 )
-from campusid.routes.errors import correlation_id as new_correlation_id
 from campusid.routes.errors import reject
 from campusid.saml.stores import utcnow
 from campusid.session.cookies import SESSION_COOKIE
@@ -110,7 +112,7 @@ async def authorize(
 ) -> Response:
     """Authenticate the user, then hand the client an authorization code."""
     app_state = request.app.state
-    reference = new_correlation_id()
+    reference = audit_correlation_id()
 
     if pending is not None:
         # Resuming after a login. The parameters come from the server-side
@@ -120,6 +122,7 @@ async def authorize(
         if stashed is None:
             return reject(ReasonCode.GRANT_INVALID, "the authorization request expired", reference)
         parameters = stashed
+        reference = _rejoin_chain(parameters, reference)
     elif request_uri is not None:
         # A pushed request (FR-OP-07). Everything comes from the record the
         # client authenticated to create; the rest of the query is ignored
@@ -131,6 +134,7 @@ async def authorize(
                 ReasonCode.GRANT_INVALID, "the request_uri is unknown, spent or expired", reference
             )
         parameters = {**pushed, "client_id": client_id, "pushed": True}
+        reference = _rejoin_chain(parameters, reference)
     else:
         parameters = {
             "client_id": client_id,
@@ -170,6 +174,32 @@ async def authorize(
     query = {"code": code, "state": parameters["state"], "iss": app_state.settings.oidc_issuer}
     log.info("oidc.code.issued", client_id=client.client_id, correlation_id=reference)
     return RedirectResponse(f"{destination}?{urlencode(query)}", status_code=303, headers=NO_STORE)
+
+
+def _provenance(request: Request) -> dict[str, str | None]:
+    """Where a request came from. See the note in `routes/saml.py`: the peer we
+    can see, never a forwarded header we cannot verify."""
+    return {
+        "source_ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent", "")[:512] or None,
+    }
+
+
+def _rejoin_chain(parameters: dict[str, Any], fallback: str) -> str:
+    """Adopt the correlation id a stashed or pushed request was created under.
+
+    An authorization request that had to wait for a login, or that was pushed
+    minutes before the browser arrived, is the same event chain as the request
+    that started it (FR-AUD-02). Both records are written by us and read only by
+    us, which is the whole reason it is safe to adopt an id from them — a
+    caller-supplied one would let anybody merge their requests into somebody
+    else's chain.
+    """
+    stored = parameters.get("correlation_id")
+    if not isinstance(stored, str) or not stored:
+        return fallback
+    set_correlation_id(stored)
+    return stored
 
 
 def _check_authorization_request(client: OidcClient, parameters: dict[str, Any]) -> None:
@@ -244,7 +274,60 @@ async def _issue_code(
     # person. By logout time it is unrecoverable from anything else, so it is
     # recorded here rather than inferred later (FR-OP-12).
     await request.app.state.client_sessions.record(session.sid, client.client_id)
+
+    await _record_release(request, client, session, identity)
+    await request.app.state.audit.record(
+        EventType.AUTHZ_CODE_ISSUED,
+        Outcome.SUCCESS,
+        actor=session.subject_key,
+        subject=session.subject_key,
+        target=client.client_id,
+        session_id=session.sid,
+        detail={"scopes": sorted(scopes)},
+        **_provenance(request),
+    )
     return code
+
+
+async def _record_release(
+    request: Request,
+    client: OidcClient,
+    session: Session,
+    identity: ReleasedIdentity,
+) -> None:
+    """Write the disclosure record (FR-ARP-06, FERPA §99.32).
+
+    Every attribute *considered*, released or not, with the basis and the rule
+    id. A record of only what was released cannot answer "why does this app not
+    see my email?", and under §99.32 the institution has to be able to produce
+    what was disclosed to whom — which means the denials are part of the record,
+    not noise beside it.
+
+    The values are redacted by the emitter; the names and the reasoning are what
+    make this useful.
+    """
+    await request.app.state.audit.record(
+        EventType.ATTRIBUTE_RELEASE,
+        Outcome.SUCCESS,
+        actor=session.subject_key,
+        subject=session.subject_key,
+        target=client.client_id,
+        session_id=session.sid,
+        detail={
+            "protocol": "oidc",
+            "released": sorted(identity.claims),
+            "decisions": [
+                {
+                    "attribute": decision.attribute,
+                    "released": decision.released,
+                    "basis": decision.basis.value,
+                    "rule_id": decision.rule_id,
+                }
+                for decision in identity.decisions
+            ],
+        },
+        **_provenance(request),
+    )
 
 
 # --- pushed authorization requests (FR-OP-07) ------------------------------
@@ -294,6 +377,7 @@ async def pushed_authorization_request(
             "code_challenge": code_challenge,
             "code_challenge_method": code_challenge_method,
             "pushed": True,
+            "correlation_id": audit_correlation_id(),
         }
         # Validated now rather than at redemption. The redirect URI check comes
         # first for the same reason as at the authorization endpoint: nothing
@@ -340,11 +424,27 @@ async def token(
                 f"{grant_type!r} is not supported",
             )
     except GrantReuse as exc:
-        # Logged at a level that pages somebody. A credential was presented
-        # twice, which means one of the two presentations was not the client.
+        # The one event in this module that is a security incident rather than a
+        # record of normal operation: a credential was presented twice, so one
+        # of the two presentations was not the client.
         log.error("oidc.grant.reuse_detected", reason=exc.reason.value, detail=exc.detail)
+        await request.app.state.audit.record(
+            EventType.GRANT_REUSE_DETECTED,
+            Outcome.FAILURE,
+            target=client_id,
+            reason=exc.reason.value,
+            **_provenance(request),
+        )
         return _token_error(exc)
     except OAuthError as exc:
+        await request.app.state.audit.record(
+            EventType.AUTHZ_DENIED,
+            Outcome.DENIED,
+            target=client_id,
+            reason=exc.reason.value,
+            detail={"grant_type": grant_type},
+            **_provenance(request),
+        )
         return _token_error(exc)
 
     return JSONResponse(body, headers=NO_STORE)
@@ -395,6 +495,16 @@ async def _exchange_code(
             issued_at=now,
         )
     )
+    await state.audit.record(
+        EventType.TOKEN_ISSUED,
+        Outcome.SUCCESS,
+        actor=client.client_id,
+        subject=grant.subject,
+        target=client.client_id,
+        session_id=grant.sid,
+        detail={"scopes": sorted(grant.scopes), "family": grant.family_id},
+        **_provenance(request),
+    )
     return _token_response(state.oidc_keys.active, context, now, refresh, with_id_token=True)
 
 
@@ -419,6 +529,16 @@ async def _exchange_refresh_token(
         family_id=record.family_id,
         scopes=frozenset(record.scopes),
         auth_time=now,
+    )
+    await state.audit.record(
+        EventType.TOKEN_REFRESHED,
+        Outcome.SUCCESS,
+        actor=client.client_id,
+        subject=record.subject,
+        target=client.client_id,
+        session_id=record.sid,
+        detail={"generation": record.generation, "family": record.family_id},
+        **_provenance(request),
     )
     # No ID token on refresh. An ID token asserts that somebody authenticated
     # just now; reissuing one because a machine presented a refresh token would
@@ -571,6 +691,14 @@ async def revoke(
     family = await _family_of(request, token, client)
     if family is not None:
         await state.grants.revoke_family(family)
+        await state.audit.record(
+            EventType.TOKEN_REVOKED,
+            Outcome.SUCCESS,
+            actor=client.client_id,
+            target=client.client_id,
+            detail={"family": family, "hint": token_type_hint},
+            **_provenance(request),
+        )
         log.info("oidc.token.revoked", client_id=client.client_id)
 
     return Response(status_code=200, headers=NO_STORE)
@@ -678,7 +806,10 @@ async def _start_login(request: Request, parameters: dict[str, Any]) -> Response
     pending = secrets.token_urlsafe(24)
     await request.app.state.redis.set(
         f"{PENDING_KEY_PREFIX}{pending}",
-        json.dumps(parameters),
+        # The chain id travels with the request, so the code eventually issued
+        # joins the authorization that asked for it even though a whole SAML
+        # login happened in between (FR-AUD-02).
+        json.dumps({**parameters, "correlation_id": audit_correlation_id()}),
         ex=int(PENDING_TTL.total_seconds()),
     )
     resume = f"/oauth2/authorize?{urlencode({'pending': pending})}"

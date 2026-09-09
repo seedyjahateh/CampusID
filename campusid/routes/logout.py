@@ -35,6 +35,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from campusid.audit.events import EventType, Outcome
 from campusid.errors import ReasonCode
 from campusid.logging import get_logger
 from campusid.oidc.jwt import JwtError, decode
@@ -121,9 +122,20 @@ async def terminate_sessions(
     for sid in sids:
         session = await sessions.load(sid)
         if session is not None:
-            outcomes.extend(await _end(request, session))
+            # A different event type from an ordinary logout: the actor is an
+            # administrator rather than the person, and an investigation reads
+            # the two very differently.
+            outcomes.extend(await _end(request, session, event=EventType.SESSION_TERMINATED))
     await sessions.terminate_subject(subject_key)
 
+    await request.app.state.audit.record(
+        EventType.ADMIN_ACTION,
+        Outcome.SUCCESS,
+        actor="administrator",
+        subject=subject_key,
+        detail={"action": "terminate_sessions", "sessions": len(sids)},
+        **_provenance(request),
+    )
     log.warning("session.terminated_by_administrator", sessions=len(sids))
     return JSONResponse(
         {
@@ -135,7 +147,9 @@ async def terminate_sessions(
     )
 
 
-async def _end(request: Request, session: Session) -> list[DeliveryOutcome]:
+async def _end(
+    request: Request, session: Session, *, event: EventType = EventType.SESSION_ENDED
+) -> list[DeliveryOutcome]:
     """Destroy a session and propagate the fact.
 
     Local destruction first. Everything after it is best-effort, and doing it in
@@ -166,12 +180,45 @@ async def _end(request: Request, session: Session) -> list[DeliveryOutcome]:
         key=state.oidc_keys.active,
         now=utcnow(),
     )
+    await state.audit.record(
+        event,
+        Outcome.SUCCESS,
+        subject=session.subject_key,
+        session_id=session.sid,
+        detail={
+            "notified": [outcome.client_id for outcome in outcomes if outcome.delivered],
+            "unreachable": [outcome.client_id for outcome in outcomes if not outcome.delivered],
+        },
+        **_provenance(request),
+    )
+    for failure in (outcome for outcome in outcomes if not outcome.delivered):
+        # Its own event, not a field on the one above. "Which clients never got
+        # the message" is the question an operator asks after an incident, and
+        # it should be answerable by event type rather than by unpacking JSON.
+        await state.audit.record(
+            EventType.LOGOUT_DELIVERY_FAILED,
+            Outcome.FAILURE,
+            subject=session.subject_key,
+            target=failure.client_id,
+            session_id=session.sid,
+            detail={"attempts": failure.attempts, "detail": failure.detail},
+            **_provenance(request),
+        )
+
     log.info(
         "session.ended",
         clients=len(clients),
         delivered=sum(1 for outcome in outcomes if outcome.delivered),
     )
     return outcomes
+
+
+def _provenance(request: Request) -> dict[str, str | None]:
+    """Where a request came from. See the note in `routes/saml.py`."""
+    return {
+        "source_ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent", "")[:512] or None,
+    }
 
 
 async def _post_logout_destination(

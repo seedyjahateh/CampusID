@@ -20,8 +20,12 @@ from alembic import context
 from sqlalchemy import Connection, pool, text
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Imported for their side effect: each module registers its tables on the shared
+# `metadata`, which is what autogenerate and the schema test compare against. A
+# table whose module is not imported here is invisible to both.
+import campusid.audit.models
 import campusid.federation.models
-import campusid.oidc.models  # noqa: F401 - registers tables on `metadata`
+import campusid.oidc.models  # noqa: F401
 from campusid.config import get_settings
 from campusid.models import metadata
 

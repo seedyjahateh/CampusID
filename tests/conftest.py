@@ -22,6 +22,7 @@ from campusid.oidc import keys as oidc_keys
 from campusid.oidc.keys import KeySet
 from campusid.saml.gate import AssertionGate, GatePolicy, IdPResolver, TrustedIdP
 from campusid.saml.stores import OutstandingRequest
+from tests.support.audit import RecordingAuditLog
 from tests.support.saml_forge import ForgedIdP
 from tests.support.stores import InMemoryReplayCache, InMemoryRequestStore
 
@@ -140,7 +141,17 @@ def oidc_key_set() -> KeySet:
 
 
 @pytest.fixture
-def app(settings: Settings, oidc_key_set: KeySet) -> FastAPI:
+def audit() -> RecordingAuditLog:
+    """The audit trail, in memory.
+
+    Attached to every app fixture, so a route that emits an event never blows up
+    for want of a database and any test can assert on what was recorded.
+    """
+    return RecordingAuditLog()
+
+
+@pytest.fixture
+def app(settings: Settings, oidc_key_set: KeySet, audit: RecordingAuditLog) -> FastAPI:
     """An application instance with no dependency probes registered.
 
     The lifespan does not run, so anything it would normally put on
@@ -150,6 +161,7 @@ def app(settings: Settings, oidc_key_set: KeySet) -> FastAPI:
     """
     app = create_app(settings)
     app.state.oidc_keys = oidc_key_set
+    app.state.audit = audit
     return app
 
 

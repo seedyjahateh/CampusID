@@ -11,12 +11,12 @@ M2. It just never reaches the person who caused it.
 
 from __future__ import annotations
 
-import secrets
 from typing import Final
 
 from fastapi.responses import HTMLResponse
 from starlette.responses import Response
 
+from campusid.audit.log import correlation_id
 from campusid.errors import ReasonCode
 from campusid.logging import get_logger
 
@@ -31,13 +31,14 @@ ERROR_PAGE: Final = """<!doctype html>
 """
 
 
-def correlation_id() -> str:
-    """A short reference a user can quote and an operator can search for."""
-    return secrets.token_hex(8)
-
-
 def reject(reason: ReasonCode, detail: str, reference: str | None = None) -> Response:
-    """Audit the reason; show the user a page that reveals none of it."""
+    """Audit the reason; show the user a page that reveals none of it.
+
+    The reference is the request's correlation id, not a fresh value. That is
+    what makes the page useful: a caller quoting it lets an operator pull the
+    whole chain of audit events for their attempt (FR-AUD-02), rather than one
+    log line that says a rejection happened.
+    """
     reference = reference or correlation_id()
     log.warning("request.rejected", reason=reason.value, detail=detail, correlation_id=reference)
     return HTMLResponse(

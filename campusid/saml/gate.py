@@ -145,6 +145,11 @@ class AssertionFacts:
     """Where the login was started from, carried on the server-side outstanding
     request. Never read from the response."""
 
+    correlation_id: str | None = None
+    """The audit chain this login belongs to, carried the same way (FR-AUD-02).
+    Never read from the response either: an issuer that could choose our
+    correlation id could merge its logins into somebody else's chain."""
+
 
 class AssertionGate:
     """Validates a SAML Response and returns the facts it asserts."""
@@ -195,6 +200,7 @@ class AssertionGate:
             attributes=_attributes(assertion),
             relay_state=request.relay_state if request else None,
             return_to=request.return_to if request else None,
+            correlation_id=request.correlation_id if request else None,
         )
 
     # --- 3. status ---------------------------------------------------------

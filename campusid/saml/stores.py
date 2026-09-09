@@ -41,6 +41,16 @@ class OutstandingRequest:
     endpoint would be. `None` means the default landing page.
     """
 
+    correlation_id: str | None = None
+    """The audit chain this login belongs to (FR-AUD-02).
+
+    `/saml/sso` and `/saml/acs` are two HTTP requests, minutes apart if the user
+    is slow at the IdP, so per-request middleware alone cannot join them. This
+    record is the only thing that already crosses that boundary, so it carries
+    the id — and because *we* wrote it, adopting it on the way back is safe in a
+    way that adopting a caller-supplied header would not be.
+    """
+
     def to_json(self) -> str:
         return json.dumps(
             {
@@ -49,6 +59,7 @@ class OutstandingRequest:
                 "relay_state": self.relay_state,
                 "created_at": self.created_at.isoformat(),
                 "return_to": self.return_to,
+                "correlation_id": self.correlation_id,
             }
         )
 
@@ -61,6 +72,7 @@ class OutstandingRequest:
             relay_state=data["relay_state"],
             created_at=datetime.fromisoformat(data["created_at"]),
             return_to=data.get("return_to"),
+            correlation_id=data.get("correlation_id"),
         )
 
 
