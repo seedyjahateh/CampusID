@@ -74,6 +74,7 @@ class ReasonCode(StrEnum):
     # These are the internal half of a two-vocabulary scheme: the client is told
     # a coarse OAuth `error`, while the audit trail records which of these it
     # actually was. See `campusid/oidc/errors.py`.
+    UNKNOWN_CLIENT = "unknown_client"
     REDIRECT_URI_MISMATCH = "redirect_uri_mismatch"
     CLIENT_AUTHENTICATION_FAILED = "client_authentication_failed"
     SCOPE_NOT_PERMITTED = "scope_not_permitted"

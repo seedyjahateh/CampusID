@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import campusid.federation.models  # noqa: F401 - registers tables on `metadata`
+import campusid.federation.models
+import campusid.oidc.models  # noqa: F401 - registers tables on `metadata`
 from campusid.models import Base, metadata
 
 
@@ -32,7 +33,7 @@ def test_declared_tables_match_the_migrations() -> None:
     deploy time. The identity registry (`person`, `account`, `identifier`)
     joins this set in M3.
     """
-    assert set(metadata.tables) == {"federation_entity"}
+    assert set(metadata.tables) == {"federation_entity", "oidc_client"}
 
 
 def test_constraint_names_follow_the_convention() -> None:
@@ -42,3 +43,13 @@ def test_constraint_names_follow_the_convention() -> None:
 
     assert table.primary_key.name == "pk_federation_entity"
     assert {index.name for index in table.indexes} == {"ix_federation_entity_role_enabled"}
+
+
+def test_no_column_could_hold_a_plaintext_client_secret() -> None:
+    """A registration endpoint returns the secret once and the broker cannot
+    show it again. That guarantee is only as good as there being nowhere to put
+    it, so the schema is asserted rather than the code path."""
+    columns = set(metadata.tables["oidc_client"].columns.keys())
+
+    assert "secret_hash" in columns
+    assert not {name for name in columns if name in {"secret", "client_secret", "password"}}
