@@ -7,11 +7,12 @@ that need live dependencies carry the ``integration`` marker.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import structlog
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -25,6 +26,23 @@ from campusid.saml.stores import OutstandingRequest
 from tests.support.audit import RecordingAuditLog
 from tests.support.saml_forge import ForgedIdP
 from tests.support.stores import InMemoryReplayCache, InMemoryRequestStore
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging() -> Iterator[None]:
+    """Undo any logging configuration a test left behind.
+
+    `configure_logging` builds a logger bound to `sys.stdout` *as it is at that
+    moment* and caches it. Under pytest that is the capture buffer for whichever
+    test called it, and the buffer is closed when that test ends — so the next
+    test in the session that logs a warning raises `ValueError: I/O operation on
+    closed file` from inside structlog, several files away from the cause.
+
+    Resetting to structlog's defaults after every test confines that to the
+    tests about logging, which is where it belongs.
+    """
+    yield
+    structlog.reset_defaults()
 
 
 @pytest.fixture(scope="session")

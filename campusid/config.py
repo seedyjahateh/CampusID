@@ -97,6 +97,46 @@ class Settings(BaseSettings):
     it is a coordinated migration rather than an operation. The default exists
     so the dev stack starts; production must override it."""
 
+    # --- Directory (FR-DIR-01, FR-DIR-02, FR-DIR-03) ---------------------
+    ldap_url: str = ""
+    """`ldaps://host:636` or `ldap://host:389`. Empty disables the integration.
+
+    Empty by default rather than pointing somewhere: a broker configured with a
+    directory it cannot reach degrades on every login, and a broker configured
+    with none simply has no directory. The second is a state an operator chose.
+    """
+
+    ldap_profile: str = "openldap"
+    """Which attribute vocabulary this directory speaks (FR-DIR-03).
+
+    Configured, never detected. Detection is a probe that succeeds against a
+    hostile server too, and taking the attribute names an attacker's directory
+    suggested is a strange place to end up.
+    """
+
+    ldap_bind_dn: str = ""
+    ldap_bind_password: str = ""
+    """FR-DIR-02. Supplied by the secrets backend at deploy time, and empty here
+    so nothing usable is committed. There is deliberately no development
+    default: a directory bind that works out of the box is a credential
+    somebody will find in the repository."""
+
+    ldap_base_dn: str = ""
+    ldap_start_tls: bool = True
+    """Whether to negotiate StartTLS on a plain `ldap://` connection.
+
+    On by default, so the insecure case is the one that has to be asked for.
+    """
+
+    ldap_allow_plaintext: bool = False
+    """FR-DIR-01's escape hatch, for a development directory with no
+    certificate.
+
+    Refused in production by the validator below, and CI asserts the compose
+    profile it uses does not set it. A bind sends the service account's password
+    in the clear, so the only acceptable place for this is a laptop.
+    """
+
     # --- Protocol parameters (validated here, enforced in M1+) -----------
     saml_clock_skew_seconds: int = Field(default=180, ge=0, le=300)
     """Assertion time-condition tolerance.
@@ -162,9 +202,45 @@ class Settings(BaseSettings):
             raise ValueError("pairwise_salt still holds its development default")
         return self
 
+    @model_validator(mode="after")
+    def _refuse_plaintext_ldap_in_production(self) -> Self:
+        """FR-DIR-01. A plain bind sends the service account's password in the
+        clear, and that account can usually read the whole directory.
+
+        Two checks rather than one: the escape hatch is refused outright in
+        production, and a plain `ldap://` URL is refused there even with StartTLS
+        configured — because StartTLS on a URL that permits falling back is a
+        downgrade an attacker on the path gets to choose.
+        """
+        if not self.is_production or not self.ldap_url:
+            return self
+        if self.ldap_allow_plaintext:
+            raise ValueError("ldap_allow_plaintext cannot be set in production")
+        if not self.ldap_url.startswith("ldaps://"):
+            raise ValueError("ldap_url must use ldaps:// in production")
+        return self
+
+    @model_validator(mode="after")
+    def _require_a_known_directory_profile(self) -> Self:
+        """A typo would select the wrong attribute vocabulary and every search
+        would return nothing, which reads as an empty directory rather than as a
+        configuration error."""
+        from campusid.directory.profiles import PROFILES
+
+        if self.ldap_url and self.ldap_profile not in PROFILES:
+            raise ValueError(
+                f"unknown ldap_profile {self.ldap_profile!r}; known profiles are {sorted(PROFILES)}"
+            )
+        return self
+
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.PRODUCTION
+
+    @property
+    def ldap_enabled(self) -> bool:
+        """Whether a directory is configured at all."""
+        return bool(self.ldap_url)
 
     @property
     def pairwise_salt_bytes(self) -> bytes:
