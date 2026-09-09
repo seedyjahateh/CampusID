@@ -150,9 +150,36 @@ async def test_keycloak_releases_the_edu_person_attributes(
         "student@campus.edu",
         "member@campus.edu",
     }
-    assert attributes["urn:oid:1.3.6.1.4.1.5923.1.1.1.7"] == [
-        "urn:mace:campus.edu:entitlement:lms:access"
-    ]
+    # And the entitlement mapper's output is deliberately *not* here. Keycloak
+    # still sends `eduPersonEntitlement`, and the broker refuses to relay it:
+    # entitlements are derived from a recorded relationship to the institution,
+    # and an upstream that could assert them into a session would be able to
+    # grant itself anything. What a person here holds comes from the registry,
+    # and this fixture user has no SIS record yet.
+    assert "urn:oid:1.3.6.1.4.1.5923.1.1.1.7" not in attributes
+
+
+async def test_an_entitlement_asserted_by_the_idp_is_not_relayed(
+    client: httpx.AsyncClient,
+) -> None:
+    """The mapper is installed and firing, so this is a refusal rather than an
+    absence.
+
+    Worth its own test because the two look identical from the session: an
+    entitlement that never arrived and one that was dropped both show up as a
+    missing key, and only one of them is a security property.
+    """
+    acs = await _authenticate(client)
+    me = await client.get(
+        f"{BROKER}/me",
+        headers={"Cookie": f"{SESSION_COOKIE}={acs.cookies[SESSION_COOKIE]}"},
+    )
+
+    # The other mappers on the same client did arrive, which is what makes this
+    # a statement about entitlements rather than about Keycloak's configuration.
+    attributes = me.json()["attributes"]
+    assert attributes["urn:oid:1.3.6.1.4.1.5923.1.1.1.6"], "the ePPN mapper fired"
+    assert "urn:oid:1.3.6.1.4.1.5923.1.1.1.7" not in attributes
 
 
 async def test_keycloak_signs_the_assertion_not_only_the_response(

@@ -7,6 +7,7 @@ prove an idle timeout is a test nobody runs.
 
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,6 +15,7 @@ from fakeredis import aioredis
 
 from campusid.session.store import (
     ABSOLUTE_TIMEOUT,
+    CARRIED_FORWARD,
     IDLE_TIMEOUT,
     SESSION_KEY_PREFIX,
     Session,
@@ -224,3 +226,49 @@ async def test_the_cookie_value_carries_no_identity(store: SessionStore) -> None
 
     assert "sam.obrien" not in created.sid
     assert "idp.test" not in created.sid
+
+
+def test_every_field_is_carried_forward_by_a_rotation() -> None:
+    """The list of fields a rotation copies is written out by hand, and an
+    enumeration like that fails silently: a field left out is reconstructed from
+    its default instead of raising.
+
+    That is not hypothetical. `person_uuid` was added to the session and left out
+    of the list, so every session knew who the person was and forgot on its first
+    load — which quietly returned the identity keying to what it had been before
+    the registry existed. This is the test that would have caught it.
+    """
+    assert {field.name for field in fields(Session)} == set(CARRIED_FORWARD)
+
+
+async def test_a_rotation_keeps_the_person(store: SessionStore) -> None:
+    """Rotation happens on authentication and on every privilege change, so a
+    person dropped here is a person dropped from every session that matters."""
+    created = await store.create(
+        idp_entity_id="https://idp.test/saml",
+        name_id="sam.obrien@campus.edu",
+        person_uuid="6f9619ff-8b86-4d01-b42d-00cf4fc964ff",
+        now=NOW,
+    )
+
+    rotated = await store.rotate(created.sid, now=NOW)
+
+    assert rotated is not None
+    assert rotated.person_uuid == "6f9619ff-8b86-4d01-b42d-00cf4fc964ff"
+    assert rotated.subject_key == "6f9619ff-8b86-4d01-b42d-00cf4fc964ff"
+
+
+async def test_a_load_keeps_the_person(store: SessionStore) -> None:
+    """A load touches the session and writes it back, which is the path that
+    dropped it."""
+    created = await store.create(
+        idp_entity_id="https://idp.test/saml",
+        name_id="sam.obrien@campus.edu",
+        person_uuid="6f9619ff-8b86-4d01-b42d-00cf4fc964ff",
+        now=NOW,
+    )
+
+    loaded = await store.load(created.sid, now=NOW + timedelta(minutes=1))
+
+    assert loaded is not None
+    assert loaded.person_uuid == "6f9619ff-8b86-4d01-b42d-00cf4fc964ff"

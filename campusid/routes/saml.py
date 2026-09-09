@@ -38,6 +38,7 @@ from campusid.audit.log import set_correlation_id
 from campusid.errors import BrokerError, ReasonCode, SamlRejected
 from campusid.identity.assertions import from_saml
 from campusid.identity.registry import STATUS_ACTIVE
+from campusid.identity.release import merge, registry_attributes
 from campusid.logging import get_logger
 from campusid.routes.errors import reject
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
@@ -225,6 +226,21 @@ async def assertion_consumer_service(
         )
         return reject(exc.reason, exc.detail or "", reference)
 
+    # What the IdP said, corrected by what we know. Identifiers we issue and
+    # entitlements we derive replace anything asserted under those names — an
+    # upstream that could assert `eduPersonEntitlement` into a session would be
+    # able to grant itself anything.
+    attributes = merge(
+        facts.attributes,
+        await registry_attributes(
+            person_uuid,
+            registry=state.identity,
+            lifecycle=state.lifecycle,
+            scope=state.settings.scope,
+        ),
+        scope=state.settings.scope,
+    )
+
     session = await state.sessions.create(
         idp_entity_id=facts.issuer,
         name_id=facts.name_id,
@@ -233,7 +249,7 @@ async def assertion_consumer_service(
         acr=facts.authn_context,
         amr=("pwd",),
         session_index=facts.session_index,
-        attributes=facts.attributes,
+        attributes=attributes,
         person_uuid=person_uuid,
     )
     await state.audit.record(
@@ -243,7 +259,10 @@ async def assertion_consumer_service(
         subject=session.subject_key,
         target=facts.issuer,
         session_id=session.sid,
-        detail={"acr": facts.authn_context, "attributes": facts.attributes},
+        # The merged set, not what arrived: the record should say what the
+        # session actually carries, and the two differ by exactly the values we
+        # overrode.
+        detail={"acr": facts.authn_context, "attributes": attributes},
         **_provenance(request),
     )
     await state.audit.record(
@@ -311,6 +330,11 @@ async def whoami(request: Request) -> Response:
         {
             "authenticated": True,
             "subject": session.subject_key,
+            # The upstream's own name for this person, alongside ours. Shown
+            # because this is the person's own view of their own session, and
+            # "which account at which IdP is this" is the first thing anybody
+            # debugging a federated login needs.
+            "name_id": session.name_id,
             "idp": session.idp_entity_id,
             "acr": session.acr,
             "auth_time": session.auth_time.isoformat(),

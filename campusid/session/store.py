@@ -276,29 +276,34 @@ def new_sid() -> str:
     return secrets.token_urlsafe(SID_BYTES)
 
 
-def _replace(session: Session, **changes: Any) -> Session:
-    """`dataclasses.replace` equivalent, spelled out.
+CARRIED_FORWARD: Final[tuple[str, ...]] = (
+    "sid",
+    "idp_entity_id",
+    "name_id",
+    "name_id_format",
+    "auth_time",
+    "created_at",
+    "last_seen_at",
+    "absolute_expiry",
+    "acr",
+    "amr",
+    "session_index",
+    "attributes",
+    "person_uuid",
+)
+"""Every field a rotation or a touch carries over.
 
-    `Session` is `slots=True` and frozen, and the field list is written here so
-    adding a field without deciding how rotation treats it fails loudly rather
-    than silently dropping it.
-    """
-    payload: dict[str, Any] = {
-        name: getattr(session, name)
-        for name in (
-            "sid",
-            "idp_entity_id",
-            "name_id",
-            "name_id_format",
-            "auth_time",
-            "created_at",
-            "last_seen_at",
-            "absolute_expiry",
-            "acr",
-            "amr",
-            "session_index",
-            "attributes",
-        )
-    }
+Written out rather than derived so adding a field is a decision about how
+rotation treats it. `test_session_store.py` asserts this list covers the
+dataclass, because the enumeration on its own fails *silently*: a field left out
+is simply reconstructed from its default, which is how `person_uuid` was quietly
+dropped on every `/me` after it was added — the session knew who the person was
+and forgot on first use.
+"""
+
+
+def _replace(session: Session, **changes: Any) -> Session:
+    """`dataclasses.replace` equivalent, spelled out."""
+    payload: dict[str, Any] = {name: getattr(session, name) for name in CARRIED_FORWARD}
     payload.update(changes)
     return Session(**payload)

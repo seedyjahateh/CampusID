@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import secrets
+import uuid
 from collections.abc import AsyncIterator
 from urllib.parse import parse_qs, urlsplit
 
@@ -192,8 +193,19 @@ async def test_a_full_sso_round_trip_establishes_a_session(
     assert me.status_code == 200
     body = me.json()
     assert body["authenticated"] is True
-    assert body["subject"] == f"{registered_idp.entity_id}|sam.obrien@campus.edu"
+
+    # The subject is the person the registry resolved, not the pair of IdP and
+    # NameID. That is what makes "end every session this person has" mean every
+    # session rather than every session from one IdP.
+    uuid.UUID(body["subject"])
+
+    # The forge asserts `student@campus.edu`, which is a different scope from
+    # this deployment's `campus.test` — so it survives, because an affiliation
+    # scoped elsewhere is somebody else's statement to make. An assertion of
+    # `student@campus.test` would have been dropped and replaced by whatever the
+    # registry holds; that case is pinned in test_registry_attribute_authority.
     assert body["attributes"]["urn:oid:1.3.6.1.4.1.5923.1.1.1.9"] == ["student@campus.edu"]
+    assert body["attributes"]["urn:oid:1.3.6.1.4.1.5923.1.1.1.13"], "our own unique id"
 
 
 async def test_me_is_unauthenticated_without_a_session(client: httpx.AsyncClient) -> None:

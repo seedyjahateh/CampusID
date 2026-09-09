@@ -12,6 +12,7 @@ implementation. SimpleSAMLphp would add that, and is deferred.
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import AsyncIterator
 from html import unescape
 from urllib.parse import parse_qs, urlsplit
@@ -144,7 +145,9 @@ async def test_login_through_the_campus_idp(client: httpx.AsyncClient) -> None:
     body = await _whoami(client, await _login(client, CAMPUS, "sam.obrien", "campus-dev-password"))
 
     assert body["idp"] == CAMPUS
-    assert str(body["subject"]).startswith(f"{CAMPUS}|")
+    # The subject is the person the registry resolved, not the IdP's name for
+    # them. Somebody who logs in through both realms is one subject.
+    uuid.UUID(str(body["subject"]))
     assert body["attributes"]["urn:oid:1.3.6.1.4.1.5923.1.1.1.6"] == [  # type: ignore[index]
         "sam.obrien@campus.edu"
     ]
@@ -162,7 +165,7 @@ async def test_login_through_the_partner_idp(client: httpx.AsyncClient) -> None:
     )
 
     assert body["idp"] == PARTNER
-    assert str(body["subject"]).startswith(f"{PARTNER}|")
+    uuid.UUID(str(body["subject"]))
 
 
 async def test_the_persistent_name_id_is_opaque(client: httpx.AsyncClient) -> None:
@@ -175,7 +178,7 @@ async def test_the_persistent_name_id_is_opaque(client: httpx.AsyncClient) -> No
     """
     body = await _whoami(client, await _login(client, CAMPUS, "sam.obrien", "campus-dev-password"))
 
-    name_id = str(body["subject"]).split("|", 1)[1]
+    name_id = str(body["name_id"])
 
     assert "sam.obrien" not in name_id
     assert "@campus.edu" not in name_id
@@ -195,11 +198,14 @@ async def test_the_persistent_name_id_is_stable_across_logins(
     assert first["subject"] == second["subject"]
 
 
-async def test_the_two_idps_produce_distinct_subjects(client: httpx.AsyncClient) -> None:
-    """A `NameID` only means something within the IdP that minted it.
+async def test_the_two_idps_produce_distinct_people(client: httpx.AsyncClient) -> None:
+    """A `NameID` only means something within the IdP that minted it, so the
+    registry matches on the pair — and two different humans at two different
+    realms resolve to two different people.
 
-    Keying identity on it alone would let two federated IdPs collide into one
-    account — which is why the session's subject key carries the issuer.
+    The interesting failure would be the other way round: an opaque `NameID`
+    that happened to collide, or a registry that matched on the subject alone,
+    would merge two strangers into one account.
     """
     campus = await _whoami(
         client, await _login(client, CAMPUS, "sam.obrien", "campus-dev-password")
@@ -209,6 +215,7 @@ async def test_the_two_idps_produce_distinct_subjects(client: httpx.AsyncClient)
     )
 
     assert campus["subject"] != partner["subject"]
+    assert campus["name_id"] != partner["name_id"]
     assert campus["idp"] != partner["idp"]
 
 
