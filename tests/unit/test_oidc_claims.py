@@ -12,6 +12,7 @@ import pytest
 from campusid.oidc.claims import (
     BY_ATTRIBUTE,
     CLAIMS,
+    MACHINE_SCOPES,
     SCOPE_AFFILIATION,
     SCOPE_EMAIL,
     SCOPE_ENTITLEMENT,
@@ -165,11 +166,26 @@ def test_local_claims_are_namespaced() -> None:
         assert claim.startswith("campus_"), claim
 
 
-@pytest.mark.parametrize("scope", [s for s in SUPPORTED_SCOPES if s != SCOPE_OPENID])
+@pytest.mark.parametrize(
+    "scope",
+    [s for s in SUPPORTED_SCOPES if s != SCOPE_OPENID and s not in MACHINE_SCOPES],
+)
 def test_every_advertised_scope_releases_something(scope: str) -> None:
     """`openid` selects no attributes by design; an advertised scope that
     selects none is a promise the broker does not keep."""
     assert attributes_for_scopes(frozenset({scope}))
+
+
+@pytest.mark.parametrize("scope", sorted(MACHINE_SCOPES))
+def test_a_machine_scope_selects_no_attributes(scope: str) -> None:
+    """The exception to the rule above, and the reason it is written as an
+    exception rather than a gap in the mapping.
+
+    A provisioning scope authorises a machine to manage the directory; there is
+    no person in the request for it to release attributes about. If one ever
+    started selecting attributes, a `client_credentials` token would be able to
+    carry claims about somebody who never authenticated."""
+    assert attributes_for_scopes(frozenset({scope})) == frozenset()
 
 
 def test_entitlement_is_its_own_scope() -> None:

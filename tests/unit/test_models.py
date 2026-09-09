@@ -9,7 +9,8 @@ from sqlalchemy import UniqueConstraint
 import campusid.audit.models
 import campusid.federation.models
 import campusid.identity.models
-import campusid.oidc.models  # noqa: F401
+import campusid.oidc.models
+import campusid.scim.models  # noqa: F401
 from campusid.models import Base, metadata
 
 
@@ -47,6 +48,7 @@ def test_declared_tables_match_the_migrations() -> None:
         "identifier",
         "account",
         "affiliation",
+        "scim_source_record",
     }
 
 

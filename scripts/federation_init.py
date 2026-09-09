@@ -254,6 +254,54 @@ def _display_name(realm: str) -> str:
     return {"campus": "Campus University", "partner": "Partner College"}.get(realm, realm.title())
 
 
+SIS_CLIENT_ID = "campus-sis"
+SIS_SECRET = "dev-only-provisioning-secret-not-for-production"  # noqa: S105
+"""A fixed development secret, and it is fixed on purpose.
+
+Everywhere else this project refuses to commit a credential — the SAML keypair
+is generated on first boot precisely so no private key is in the repository. The
+difference is that this one is *only* usable against a broker whose own
+`CAMPUSID_ENVIRONMENT` is `dev`, it grants nothing but SCIM scopes on a database
+full of fixture people, and the alternative is a generated secret that the
+integration tests would then have to read out of the container.
+
+A real deployment registers its SIS through the admin API and gets a generated
+secret once. This script runs only under the `federation` compose profile.
+"""
+
+
+async def register_provisioning_client() -> None:
+    """Register the SIS as a confidential client with the SCIM scopes.
+
+    FR-SCIM-13's other half. The SCIM API takes a bearer token from this
+    broker's own token endpoint, so there has to *be* a client that can get one
+    — and a provisioning client uses the client-credentials grant, because an
+    SIS runs at three in the morning and there is nobody to authenticate.
+    """
+    from campusid.oidc.claims import SCOPE_SCIM_READ, SCOPE_SCIM_WRITE
+    from campusid.oidc.clients import ClientType
+    from campusid.oidc.registry import ClientRegistry
+
+    engine = create_engine(Settings())
+    try:
+        registry = ClientRegistry(create_session_factory(engine))
+        await registry.register(
+            client_id=SIS_CLIENT_ID,
+            client_type=ClientType.CONFIDENTIAL,
+            display_name="Campus SIS (development fixture)",
+            # A client-credentials client never redirects anybody, but a
+            # registration must carry a redirect URI — so it gets one that
+            # cannot be reached, rather than a plausible one somebody might
+            # later mistake for a real integration.
+            redirect_uris=("https://sis.campus.test/unused",),
+            allowed_scopes=frozenset({"openid", SCOPE_SCIM_READ, SCOPE_SCIM_WRITE}),
+            secret=SIS_SECRET,
+        )
+        log(f"registered provisioning client {SIS_CLIENT_ID}")
+    finally:
+        await engine.dispose()
+
+
 async def main() -> int:
     async with httpx.AsyncClient(follow_redirects=True) as client:
         await wait_for(client, f"{BROKER}/healthz", "broker")
@@ -268,6 +316,7 @@ async def main() -> int:
             await upsert_saml_client(client, token, realm, metadata.content)
 
     entity_ids = await register_idps_with_broker(REALMS)
+    await register_provisioning_client()
 
     log("metadata exchange complete")
     for entity_id in entity_ids:

@@ -31,6 +31,7 @@ from typing import Final
 from urllib.parse import urlsplit
 
 from campusid.errors import ReasonCode
+from campusid.oidc.claims import MACHINE_SCOPES
 from campusid.oidc.errors import (
     INVALID_CLIENT,
     INVALID_REQUEST,
@@ -39,8 +40,10 @@ from campusid.oidc.errors import (
 )
 
 SCOPE_OPENID: Final = "openid"
-"""Without it the request is plain OAuth 2.0 and no ID token is issued. Required
-here, because this broker exists to authenticate people."""
+"""Without it a browser request is plain OAuth 2.0 and no ID token is issued.
+Required of every registration, because this broker exists to authenticate
+people — a provisioning client registers for it and simply never uses a browser
+flow."""
 
 LOOPBACK_HOSTS: Final = frozenset({"127.0.0.1", "[::1]"})
 """Literal addresses only. RFC 8252 §8.3 excludes `localhost` on purpose: it
@@ -172,7 +175,7 @@ class OidcClient:
     # --- scopes -----------------------------------------------------------
 
     def granted_scopes(self, requested: str | None) -> frozenset[str]:
-        """Narrow a request's scopes to what this client may have.
+        """Narrow a browser flow's scopes to what this client may have.
 
         Unknown scopes are refused rather than dropped. Silently narrowing lets
         a client believe it received `email` and read a claim that is not there,
@@ -185,7 +188,58 @@ class OidcClient:
                 ReasonCode.SCOPE_NOT_PERMITTED,
                 "the openid scope is required",
             )
+
+        machine = asked & MACHINE_SCOPES
+        if machine:
+            # A provisioning scope must never come out of a browser flow. With
+            # one, an authorization code stolen from any user would become
+            # directory write access — and `openid` is already in this request,
+            # so the token would claim a person authenticated for it.
+            raise OAuthError(
+                INVALID_SCOPE,
+                ReasonCode.SCOPE_NOT_PERMITTED,
+                f"{sorted(machine)} is only available to the client_credentials grant",
+            )
+
         excess = asked - self.allowed_scopes
+        if excess:
+            raise OAuthError(
+                INVALID_SCOPE,
+                ReasonCode.SCOPE_NOT_PERMITTED,
+                f"{sorted(excess)} not permitted for {self.client_id!r}",
+            )
+        return asked
+
+    def machine_scopes(self, requested: str | None) -> frozenset[str]:
+        """Narrow a client-credentials request's scopes.
+
+        Defaults to every machine scope the client is registered for when it
+        asks for none, which is what RFC 6749 §3.3 permits and what every
+        provisioning client does. Asking for a subset is honoured, because a
+        careful client narrowing itself should not be overruled.
+
+        `openid` is refused outright: there is no person here, so a token that
+        claimed one would be a lie the resource server has no way to detect.
+        """
+        available = self.allowed_scopes & MACHINE_SCOPES
+        if not available:
+            raise OAuthError(
+                INVALID_SCOPE,
+                ReasonCode.SCOPE_NOT_PERMITTED,
+                f"{self.client_id!r} is not registered for any machine scope",
+            )
+
+        asked = frozenset((requested or "").split())
+        if not asked:
+            return available
+        if SCOPE_OPENID in asked:
+            raise OAuthError(
+                INVALID_SCOPE,
+                ReasonCode.SCOPE_NOT_PERMITTED,
+                "client_credentials authenticates no person, so openid is meaningless",
+            )
+
+        excess = asked - available
         if excess:
             raise OAuthError(
                 INVALID_SCOPE,

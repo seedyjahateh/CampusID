@@ -71,7 +71,10 @@ def discovery_document(issuer: str) -> dict[str, Any]:
         # tokens in a URL fragment.
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        # `client_credentials` is here for provisioning clients only (FR-SCIM-13);
+        # it issues no ID token and no `openid` scope, so it is a grant of this
+        # authorization server rather than of OpenID Connect.
+        "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         # Pairwise is this broker's default and the only mode a client can rely
         # on; an SP configured for `shared` gets a public subject, but that is a
         # per-SP policy decision rather than something a client may request.

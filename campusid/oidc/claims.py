@@ -55,12 +55,32 @@ SCOPE_EMAIL: Final = "email"
 SCOPE_AFFILIATION: Final = "campus:affiliation"
 SCOPE_ENTITLEMENT: Final = "campus:entitlement"
 
+SCOPE_SCIM_READ: Final = "scim:read"
+SCOPE_SCIM_WRITE: Final = "scim:write"
+"""FR-SCIM-13's provisioning scopes.
+
+They select no attributes, because they are not about a person at all — they
+authorise a machine to manage the directory. That makes them the one kind of
+scope this module maps nothing for, and the reason `SCOPE_TO_ATTRIBUTES` is
+keyed by mapping rather than by membership of `SUPPORTED_SCOPES`.
+"""
+
+MACHINE_SCOPES: Final[frozenset[str]] = frozenset({SCOPE_SCIM_READ, SCOPE_SCIM_WRITE})
+"""Scopes obtainable only through the client-credentials grant.
+
+A browser flow must never issue one: `openid` means "a person authenticated",
+and a token carrying both that and `scim:write` would let an authorization code
+stolen from any user become directory write access.
+"""
+
 SUPPORTED_SCOPES: Final[tuple[str, ...]] = (
     SCOPE_OPENID,
     SCOPE_PROFILE,
     SCOPE_EMAIL,
     SCOPE_AFFILIATION,
     SCOPE_ENTITLEMENT,
+    SCOPE_SCIM_READ,
+    SCOPE_SCIM_WRITE,
 )
 """What the discovery document advertises. A scope not listed here cannot be
 registered against a client, so the two never drift."""

@@ -46,6 +46,7 @@ from campusid.oidc.clients import ClientType, OidcClient
 from campusid.oidc.errors import (
     INVALID_CLIENT,
     INVALID_REQUEST,
+    UNAUTHORIZED_CLIENT,
     UNSUPPORTED_GRANT_TYPE,
     UNSUPPORTED_RESPONSE_TYPE,
     OAuthError,
@@ -87,6 +88,7 @@ GRANT_AUTHORIZATION_CODE: Final = "authorization_code"
 # bandit rule because of the word "token"; suppressed here rather than renamed,
 # since the string has to be exactly this.
 GRANT_REFRESH_TOKEN: Final = "refresh_token"  # noqa: S105
+GRANT_CLIENT_CREDENTIALS: Final = "client_credentials"
 
 NO_STORE: Final = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 """RFC 6749 §5.1. These responses contain credentials; an intermediary caching
@@ -407,16 +409,19 @@ async def token(
     redirect_uri: Annotated[str | None, Form()] = None,
     code_verifier: Annotated[str | None, Form()] = None,
     refresh_token: Annotated[str | None, Form()] = None,
+    scope: Annotated[str | None, Form()] = None,
     client_id: Annotated[str | None, Form()] = None,
     client_secret: Annotated[str | None, Form()] = None,
 ) -> Response:
-    """Exchange a code or a refresh token for tokens."""
+    """Exchange a code, a refresh token, or a client's own credentials."""
     try:
         client = await _authenticated_client(request, client_id, client_secret)
         if grant_type == GRANT_AUTHORIZATION_CODE:
             body = await _exchange_code(request, client, code, redirect_uri, code_verifier)
         elif grant_type == GRANT_REFRESH_TOKEN:
             body = await _exchange_refresh_token(request, client, refresh_token)
+        elif grant_type == GRANT_CLIENT_CREDENTIALS:
+            body = await _client_credentials(request, client, scope)
         else:
             raise OAuthError(
                 UNSUPPORTED_GRANT_TYPE,
@@ -545,6 +550,71 @@ async def _exchange_refresh_token(
     # be asserting a login that did not happen, and a client enforcing `max_age`
     # would be misled by it.
     return _token_response(state.oidc_keys.active, context, now, rotated, with_id_token=False)
+
+
+async def _client_credentials(
+    request: Request, client: OidcClient, requested: str | None
+) -> dict[str, Any]:
+    """RFC 6749 §4.4 — a client acting as itself (FR-SCIM-13).
+
+    The grant a provisioning client needs, because an SIS runs at three in the
+    morning and there is nobody to authenticate. Four things follow from there
+    being no person involved, and each is a deliberate omission rather than an
+    unfinished edge:
+
+    **Confidential clients only.** The secret *is* the authentication. A public
+    client has none, so this grant would let anybody who knows a `client_id`
+    mint a token in its name.
+
+    **No `openid` and no ID token.** An ID token asserts that somebody signed
+    in; issuing one here would assert a login that did not happen.
+
+    **No refresh token.** The client holds a secret and can ask again whenever
+    it likes, so a refresh token would be a second long-lived credential with
+    nothing to justify it.
+
+    **No session, so no `sid`.** The token carries the client as its own
+    subject, which is what makes an audit record say "the SIS did this" rather
+    than attributing a machine's action to whichever person it happened to be
+    editing.
+    """
+    if client.client_type is not ClientType.CONFIDENTIAL:
+        raise OAuthError(
+            UNAUTHORIZED_CLIENT,
+            ReasonCode.CLIENT_AUTHENTICATION_FAILED,
+            "client_credentials requires a confidential client",
+        )
+
+    granted = client.machine_scopes(requested)
+    state = request.app.state
+    now = utcnow()
+
+    context = TokenContext(
+        issuer=state.settings.oidc_issuer,
+        client_id=client.client_id,
+        subject=client.client_id,
+        sid="",
+        family_id="",
+        scopes=granted,
+        auth_time=now,
+    )
+    access, _ = access_token(context, state.oidc_keys.active, now=now)
+
+    await state.audit.record(
+        EventType.TOKEN_ISSUED,
+        Outcome.SUCCESS,
+        actor=client.client_id,
+        subject=client.client_id,
+        target=client.client_id,
+        detail={"grant": "client_credentials", "scopes": sorted(granted)},
+        **_provenance(request),
+    )
+    return {
+        "access_token": access,
+        "token_type": "Bearer",
+        "expires_in": int(ACCESS_TOKEN_TTL.total_seconds()),
+        "scope": " ".join(sorted(granted)),
+    }
 
 
 def _token_response(

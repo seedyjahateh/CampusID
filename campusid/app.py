@@ -43,6 +43,7 @@ from campusid.saml.metadata_sp import (
     build_sp_metadata,
 )
 from campusid.saml.stores import RedisReplayCache, RedisRequestStore
+from campusid.scim.store import UserStore
 from campusid.session.store import SessionStore
 
 SP_CONTACTS = (
@@ -120,6 +121,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.logout_notifier = LogoutNotifier(issuer=settings.oidc_issuer, client=logout_http)
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
+    app.state.scim_users = UserStore(
+        session_factory, issuer=settings.oidc_issuer, scope=settings.scope
+    )
 
     log.info(
         "broker.startup",
