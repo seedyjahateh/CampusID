@@ -62,6 +62,15 @@ class UserRecord:
     identifiers: list[Identifier]
     affiliations: list[Affiliation]
     external_id: str | None = None
+    groups: tuple[tuple[str, str], ...] = ()
+    """`(group id, display name)` for each group this person belongs to.
+
+    Read-only in both directions: RFC 7643 §4.1.2 makes `groups` a `User`
+    attribute the server maintains, and membership is changed through `/Groups`.
+    A client that could add itself to a group by writing to its own record would
+    have two paths to the same grant, and only one of them audited as a
+    membership change.
+    """
 
 
 def to_scim(record: UserRecord, *, issuer: str) -> dict[str, Any]:
@@ -101,6 +110,17 @@ def to_scim(record: UserRecord, *, issuer: str) -> dict[str, Any]:
     if enterprise:
         resource["schemas"].append(ENTERPRISE_USER)
         resource[ENTERPRISE_USER] = enterprise
+
+    if record.groups:
+        resource["groups"] = [
+            {
+                "value": group_id,
+                "display": display,
+                "type": "direct",
+                "$ref": f"{issuer}/scim/v2/Groups/{group_id}",
+            }
+            for group_id, display in record.groups
+        ]
 
     campus = _campus(record)
     if campus:

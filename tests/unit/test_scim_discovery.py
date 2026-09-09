@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from campusid.routes.scim import SCIM_CONTENT_TYPE
 from campusid.scim.schemas import (
     CAMPUS_USER,
+    CORE_GROUP,
     CORE_USER,
     ENTERPRISE_USER,
     LIST_RESPONSE,
@@ -127,7 +128,22 @@ async def test_every_schema_is_listed(client: AsyncClient) -> None:
         CORE_USER,
         ENTERPRISE_USER,
         CAMPUS_USER,
+        CORE_GROUP,
     }
+
+
+async def test_group_members_are_returned_only_on_request(client: AsyncClient) -> None:
+    """A promise a conformance client reads before it asks.
+
+    `returned: "request"` is why a group comes back without its membership, and
+    declaring it here is what makes that a documented behaviour rather than a
+    missing attribute the client has to guess about.
+    """
+    body = (await client.get(f"/scim/v2/Schemas/{CORE_GROUP}")).json()
+
+    members = next(attribute for attribute in body["attributes"] if attribute["name"] == "members")
+    assert members["returned"] == "request"
+    assert members["multiValued"] is True
 
 
 async def test_a_schema_is_addressable_by_its_urn(client: AsyncClient) -> None:

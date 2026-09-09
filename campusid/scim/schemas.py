@@ -129,6 +129,7 @@ def _attribute(
     mutability: str = "readWrite",
     case_exact: bool = False,
     uniqueness: str = "none",
+    returned: str = "default",
     sub_attributes: list[dict[str, Any]] | None = None,
     description: str = "",
 ) -> dict[str, Any]:
@@ -146,7 +147,7 @@ def _attribute(
         "required": required,
         "caseExact": case_exact,
         "mutability": mutability,
-        "returned": "default",
+        "returned": returned,
         "uniqueness": uniqueness,
     }
     if sub_attributes is not None:
@@ -156,7 +157,47 @@ def _attribute(
 
 def schemas(issuer: str) -> list[dict[str, Any]]:
     """`GET /scim/v2/Schemas` — every schema this server understands."""
-    return [_core_user(issuer), _enterprise_user(issuer), _campus_user(issuer)]
+    return [_core_user(issuer), _enterprise_user(issuer), _campus_user(issuer), _core_group(issuer)]
+
+
+def _core_group(issuer: str) -> dict[str, Any]:
+    return {
+        "schemas": [SCHEMA_SCHEMA],
+        "id": CORE_GROUP,
+        "name": "Group",
+        "description": "SCIM core Group",
+        "attributes": [
+            _attribute(
+                "displayName",
+                required=True,
+                uniqueness="server",
+                description="The group's name. Unique; a duplicate is a 409.",
+            ),
+            _attribute(
+                "externalId",
+                case_exact=True,
+                description="The provisioning client's key. Drives idempotency on retry.",
+            ),
+            _attribute(
+                "members",
+                "complex",
+                multi=True,
+                returned="request",
+                description=(
+                    "Returned only when asked for by name. A group here may have tens of "
+                    "thousands of members, and serving them on every read would make listing "
+                    "groups cost the whole membership table. For a large group, ask "
+                    '/Users?filter=groups.value eq "<id>" instead, which pages.'
+                ),
+                sub_attributes=[
+                    _attribute("value"),
+                    _attribute("display", mutability="immutable"),
+                    _attribute("type", mutability="immutable"),
+                ],
+            ),
+        ],
+        "meta": {"resourceType": "Schema", "location": f"{issuer}/scim/v2/Schemas/{CORE_GROUP}"},
+    }
 
 
 def _core_user(issuer: str) -> dict[str, Any]:

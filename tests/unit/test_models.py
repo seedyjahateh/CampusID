@@ -49,6 +49,8 @@ def test_declared_tables_match_the_migrations() -> None:
         "account",
         "affiliation",
         "scim_source_record",
+        "scim_group",
+        "scim_group_member",
     }
 
 

@@ -277,6 +277,152 @@ async def delete_user(request: Request, resource_id: str) -> Response:
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
+# --- /Groups ----------------------------------------------------------------
+
+
+def _wants_members(request: Request) -> bool:
+    """Whether this request asked for the membership.
+
+    `members` is `returned: "request"` in the Group schema, so it is served only
+    when the client names it in `attributes`. That is not a shortcut: a group
+    here may have tens of thousands of members, and returning them by default
+    would make `GET /Groups` cost the whole membership table.
+    """
+    requested = _csv(request.query_params.get("attributes"))
+    excluded = _csv(request.query_params.get("excludedAttributes"))
+    return "members" in requested and "members" not in excluded
+
+
+@router.post("/scim/v2/Groups")
+async def create_group(request: Request) -> JSONResponse:
+    """Create a group (FR-SCIM-11)."""
+    try:
+        await require_scope(request, SCOPE_WRITE)
+        resource, created = await request.app.state.scim_groups.create(await _body(request))
+    except ScimError as exc:
+        return _error(exc)
+
+    return _resource(resource, 201 if created else 200)
+
+
+@router.get("/scim/v2/Groups")
+async def list_groups(
+    request: Request,
+    filter: str | None = None,
+    startIndex: int = 1,
+    count: int = DEFAULT_COUNT,
+    sortBy: str | None = None,
+    sortOrder: str = "ascending",
+) -> JSONResponse:
+    """List groups.
+
+    A filter here addresses the group's own attributes. "Who is in this group"
+    is asked from the other side — `GET /Users?filter=groups.value eq "<id>"` —
+    which pages, where a members filter would have to load every membership row
+    to answer.
+    """
+    try:
+        await require_scope(request, SCOPE_READ)
+        predicate = parse_filter(filter) if filter else None
+        page = await request.app.state.scim_groups.search(
+            predicate=predicate,
+            start_index=startIndex,
+            count=count,
+            sort_by=sortBy,
+            descending=sortOrder.lower() == "descending",
+            with_members=_wants_members(request),
+        )
+    except ScimFilterError as exc:
+        return _error(invalid_filter(str(exc)))
+    except ScimError as exc:
+        return _error(exc)
+
+    return JSONResponse(
+        page.to_list_response(),
+        media_type=SCIM_CONTENT_TYPE,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/scim/v2/Groups/{group_id}")
+async def get_group(request: Request, group_id: str) -> Response:
+    """Read one group."""
+    try:
+        await require_scope(request, SCOPE_READ)
+        resource = await request.app.state.scim_groups.get(
+            group_id, with_members=_wants_members(request)
+        )
+    except ScimError as exc:
+        return _error(exc)
+
+    version = resource["meta"]["version"]
+    if _matches_none(request, version):
+        return Response(status_code=304, headers={"ETag": version, "Cache-Control": "no-store"})
+
+    return _resource(_project(request, resource))
+
+
+@router.put("/scim/v2/Groups/{group_id}")
+async def replace_group(request: Request, group_id: str) -> JSONResponse:
+    """Replace a group.
+
+    A body with no `members` at all leaves the membership alone — see the store
+    for why. An explicit empty array still clears it.
+    """
+    try:
+        await require_scope(request, SCOPE_WRITE)
+        resource = await request.app.state.scim_groups.replace(
+            group_id, await _body(request), if_match=request.headers.get("if-match")
+        )
+    except ScimError as exc:
+        return _error(exc)
+
+    return _resource(resource)
+
+
+@router.patch("/scim/v2/Groups/{group_id}")
+async def patch_group(request: Request, group_id: str) -> JSONResponse:
+    """Modify a group (FR-SCIM-11's performance requirement).
+
+    Unlike `/Users`, this does not patch a projected document. A group's
+    document is its membership, and projecting it to change one member is the
+    full-collection read the requirement exists to avoid — so membership
+    operations become row-level writes and the rest is a short attribute
+    mapping.
+    """
+    try:
+        await require_scope(request, SCOPE_WRITE)
+        operations = parse_operations(await _body(request))
+        resource = await request.app.state.scim_groups.patch(
+            group_id, operations, if_match=request.headers.get("if-match")
+        )
+    except PatchError as exc:
+        return _error(ScimError(400, str(exc), exc.scim_type))
+    except ScimError as exc:
+        return _error(exc)
+
+    return _resource(resource)
+
+
+@router.delete("/scim/v2/Groups/{group_id}")
+async def delete_group(request: Request, group_id: str) -> Response:
+    """Delete a group, and its membership with it.
+
+    A real delete, unlike a person's. A group is an access-control grouping
+    rather than somebody's identity, and a tombstone would only make its name
+    unusable for whatever replaces it.
+    """
+    try:
+        await require_scope(request, SCOPE_WRITE)
+        await request.app.state.scim_groups.delete(
+            group_id, if_match=request.headers.get("if-match")
+        )
+    except ScimError as exc:
+        return _error(exc)
+
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
 # --- request helpers --------------------------------------------------------
 
 

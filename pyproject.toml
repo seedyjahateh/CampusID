@@ -102,6 +102,7 @@ markers = [
     "e2e: requires a browser and the full compose stack",
     "security: negative test - asserts a specific rejection reason code",
     "federation: requires the federation profile (Keycloak) to be up",
+    "slow: builds a large fixture - asserts a performance budget, not behaviour",
 ]
 
 [tool.coverage.run]

@@ -96,11 +96,6 @@ def duplicate(attribute: str, value: str) -> ScimError:
     return ScimError(409, f"{attribute} {value!r} is already in use", ScimType.UNIQUENESS)
 
 
-def immutable(attribute: str) -> ScimError:
-    """409 `mutability`. Never succeeds; a retry is wasted on both sides."""
-    return ScimError(409, f"{attribute} cannot be changed", ScimType.MUTABILITY)
-
-
 def version_mismatch(expected: str) -> ScimError:
     """412 (FR-SCIM-09).
 

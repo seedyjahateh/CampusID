@@ -163,6 +163,12 @@ services:
       target: dev
     image: campusid/broker:test
     environment: *broker-env
+    # The working tree, so a test run reflects the file just edited rather than
+    # whatever was baked into the image. Only the test runner gets this: the
+    # broker stays immutable and read-only, because a container serving code it
+    # picked up from the host is not the thing CI built.
+    volumes:
+      - .:/app
     depends_on:
       broker:
         condition: service_healthy

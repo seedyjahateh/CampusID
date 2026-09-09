@@ -43,6 +43,7 @@ from campusid.saml.metadata_sp import (
     build_sp_metadata,
 )
 from campusid.saml.stores import RedisReplayCache, RedisRequestStore
+from campusid.scim.groups import GroupStore
 from campusid.scim.store import UserStore
 from campusid.session.store import SessionStore
 
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scim_users = UserStore(
         session_factory, issuer=settings.oidc_issuer, scope=settings.scope
     )
+    app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
 
     log.info(
         "broker.startup",

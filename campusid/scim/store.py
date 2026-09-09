@@ -50,7 +50,7 @@ from campusid.scim.errors import (
     version_mismatch,
 )
 from campusid.scim.filters import Node, matches
-from campusid.scim.models import ScimSourceRecord
+from campusid.scim.models import ScimGroup, ScimGroupMember, ScimSourceRecord
 from campusid.scim.resources import (
     ParsedUser,
     UserRecord,
@@ -501,6 +501,7 @@ class UserStore:
             identifiers=await self._identifiers(session, person_uuid),
             affiliations=await self._affiliations(session, person_uuid),
             external_id=source.external_id if source else None,
+            groups=tuple((await self._groups(session, [person_uuid])).get(person_uuid, ())),
         )
 
     async def _load_many(self, session: AsyncSession, people: list[Person]) -> list[UserRecord]:
@@ -535,6 +536,7 @@ class UserStore:
             affiliations_by_person[affiliation.person_uuid].append(affiliation)
 
         external = {source.person_uuid: source.external_id for source in sources}
+        groups = await self._groups(session, keys)
 
         return [
             UserRecord(
@@ -542,9 +544,35 @@ class UserStore:
                 identifiers=by_person[person.person_uuid],
                 affiliations=affiliations_by_person[person.person_uuid],
                 external_id=external.get(person.person_uuid),
+                groups=tuple(groups.get(person.person_uuid, ())),
             )
             for person in people
         ]
+
+    async def _groups(
+        self, session: AsyncSession, people: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[tuple[str, str]]]:
+        """Which groups each of these people belongs to.
+
+        One query for the whole page, for the same reason identifiers are loaded
+        that way. `groups` is read-only on a User (RFC 7643 §4.1.2): membership
+        is changed through `/Groups`, and this direction exists so a client can
+        see the result of having done so.
+        """
+        if not people:
+            return {}
+
+        rows = await session.execute(
+            select(ScimGroupMember.person_uuid, ScimGroup.group_uuid, ScimGroup.display_name)
+            .join(ScimGroup, ScimGroup.group_uuid == ScimGroupMember.group_uuid)
+            .where(ScimGroupMember.person_uuid.in_(people))
+            .order_by(ScimGroup.display_name)
+        )
+
+        memberships: dict[uuid.UUID, list[tuple[str, str]]] = {}
+        for person_uuid, group_uuid, display_name in rows:
+            memberships.setdefault(person_uuid, []).append((str(group_uuid), display_name))
+        return memberships
 
     async def _identifiers(self, session: AsyncSession, person_uuid: uuid.UUID) -> list[Identifier]:
         return list(
