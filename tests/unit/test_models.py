@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from sqlalchemy import UniqueConstraint
+
 # Imported for their side effect: each registers its tables on the shared
 # `metadata` this file asserts against.
 import campusid.audit.models
 import campusid.federation.models
+import campusid.identity.models
 import campusid.oidc.models  # noqa: F401
 from campusid.models import Base, metadata
 
@@ -36,7 +39,32 @@ def test_declared_tables_match_the_migrations() -> None:
     deploy time. The identity registry (`person`, `account`, `identifier`)
     joins this set in M3.
     """
-    assert set(metadata.tables) == {"federation_entity", "oidc_client", "audit_event"}
+    assert set(metadata.tables) == {
+        "federation_entity",
+        "oidc_client",
+        "audit_event",
+        "person",
+        "identifier",
+        "account",
+        "affiliation",
+    }
+
+
+def test_an_identifier_is_unique_regardless_of_release() -> None:
+    """FR-LC-08 as a schema property rather than an application rule.
+
+    The constraint covers tombstoned rows, so reissuing a released ePPN is a
+    write the database refuses. Asserted here because it is the kind of clause
+    that a later migration could relax without anybody noticing what it was
+    protecting.
+    """
+    unique = {
+        constraint.name: {column.name for column in constraint.columns}
+        for constraint in metadata.tables["identifier"].constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+    assert unique["uq_identifier_type_value_scope"] == {"id_type", "value", "scope"}
 
 
 def test_constraint_names_follow_the_convention() -> None:
