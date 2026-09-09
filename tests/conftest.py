@@ -18,6 +18,8 @@ from httpx import ASGITransport, AsyncClient
 from campusid.app import create_app
 from campusid.config import Environment, Settings
 from campusid.keys import SigningMaterial, generate_self_signed
+from campusid.oidc import keys as oidc_keys
+from campusid.oidc.keys import KeySet
 from campusid.saml.gate import AssertionGate, GatePolicy, IdPResolver, TrustedIdP
 from campusid.saml.stores import OutstandingRequest
 from tests.support.saml_forge import ForgedIdP
@@ -125,13 +127,30 @@ def settings(tmp_path: Path) -> Settings:
         base_url="https://broker.test",
         log_format="console",
         saml_key_dir=str(tmp_path / "saml"),
+        policy_dir=str(tmp_path / "policies"),
+        scope="campus.test",
     )
 
 
+@pytest.fixture(scope="session")
+def oidc_key_set() -> KeySet:
+    """The broker's token-signing keys. Session-scoped for the same reason as
+    the forge's: RSA keygen costs more than every test using it."""
+    return KeySet(active=oidc_keys.generate(key_size=2048))
+
+
 @pytest.fixture
-def app(settings: Settings) -> FastAPI:
-    """An application instance with no dependency probes registered."""
-    return create_app(settings)
+def app(settings: Settings, oidc_key_set: KeySet) -> FastAPI:
+    """An application instance with no dependency probes registered.
+
+    The lifespan does not run, so anything it would normally put on
+    ``app.state`` is injected here instead. That is the same substitutability
+    the gate's stores have, and for the same reason: the HTTP surface has to be
+    exhaustively testable without containers.
+    """
+    app = create_app(settings)
+    app.state.oidc_keys = oidc_key_set
+    return app
 
 
 @pytest.fixture

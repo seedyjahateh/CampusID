@@ -17,7 +17,11 @@ from campusid.federation.registry import FederationRegistry
 from campusid.keys import load_or_create
 from campusid.logging import configure_logging, get_logger
 from campusid.middleware import BodySizeLimitMiddleware, SecurityHeadersMiddleware
+from campusid.oidc import keys as oidc_keys
+from campusid.oidc.registry import ClientRegistry
+from campusid.policy.loader import PolicyStore
 from campusid.routes import disco as disco_routes
+from campusid.routes import oidc as oidc_routes
 from campusid.routes import saml as saml_routes
 from campusid.saml.gate import AssertionGate, GatePolicy
 from campusid.saml.metadata_sp import (
@@ -89,6 +93,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         request_store=app.state.request_store,
     )
 
+    # The OIDC signing key shares the SAML volume: an ephemeral one would
+    # invalidate every outstanding token on restart, and every client that
+    # cached our JWKS would refuse tokens it should honour.
+    app.state.oidc_keys = oidc_keys.load_or_create_key_set(Path(settings.saml_key_dir))
+    app.state.clients = ClientRegistry(session_factory)
+    app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
+
     log.info(
         "broker.startup",
         environment=settings.environment.value,
@@ -136,5 +147,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(saml_routes.router)
     app.include_router(disco_routes.router)
+    app.include_router(oidc_routes.router)
 
     return app

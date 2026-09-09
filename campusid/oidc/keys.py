@@ -20,8 +20,10 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from campusid.oidc.jwt import RS256, SigningKey, b64url
@@ -110,3 +112,102 @@ def thumbprint(public_key: rsa.RSAPublicKey) -> str:
 def _to_bytes(value: int) -> bytes:
     """Big-endian, minimum length, as JWA requires for `n` and `e`."""
     return value.to_bytes((value.bit_length() + 7) // 8, "big")
+
+
+# --- persistence -----------------------------------------------------------
+#
+# The key set lives in the same mounted volume as the SAML keypair, for the
+# reason a restart makes obvious: an ephemeral signing key invalidates every
+# outstanding ID token and access token the moment the process comes back, and
+# every client that cached the JWKS starts refusing tokens it should honour.
+
+ACTIVE_KEY_FILE: Final = "oidc-active.key"
+RETIRING_DIR: Final = "oidc-retiring"
+
+
+def load_or_create_key_set(directory: Path, *, key_size: int = KEY_SIZE) -> KeySet:
+    """Load the signing key set, generating the active key if it is absent.
+
+    Idempotent, so restarting keeps the identity clients have cached. Every
+    private key in `oidc-retiring/` is published and accepted but never used to
+    sign, which is what makes a rotation invisible to a client holding a token
+    minted a minute before it.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    active_path = directory / ACTIVE_KEY_FILE
+
+    if active_path.is_file():
+        active = _read_key(active_path)
+    else:
+        active = generate(key_size)
+        _write_key(active_path, active)
+
+    retiring_dir = directory / RETIRING_DIR
+    retiring = (
+        tuple(_read_key(path) for path in sorted(retiring_dir.glob("*.key")))
+        if retiring_dir.is_dir()
+        else ()
+    )
+    return KeySet(active=active, retiring=retiring)
+
+
+def rotate(directory: Path, *, key_size: int = KEY_SIZE) -> KeySet:
+    """Mint a new active key, moving the outgoing one to `retiring/`.
+
+    Rotation is two steps, not one, and this is the first: from here the new key
+    signs and both verify. The second step — deleting the retired key once the
+    longest-lived token bearing it has expired — is deliberately *not* automatic.
+    Doing it on a timer means a clock problem or a long-lived refresh token
+    turns into every session breaking at once, so it is a decision an operator
+    makes with `retire`.
+    """
+    current = load_or_create_key_set(directory, key_size=key_size)
+
+    retiring_dir = directory / RETIRING_DIR
+    retiring_dir.mkdir(parents=True, exist_ok=True)
+    _write_key(retiring_dir / f"{_filename(current.active.kid)}.key", current.active)
+
+    fresh = generate(key_size)
+    _write_key(directory / ACTIVE_KEY_FILE, fresh)
+    return KeySet(active=fresh, retiring=(*current.retiring, current.active))
+
+
+def retire(directory: Path, kid: str) -> KeySet:
+    """Drop a retiring key, ending its rotation.
+
+    Every token still bearing this `kid` stops verifying at once, which is why
+    it is a separate act from `rotate`.
+    """
+    path = directory / RETIRING_DIR / f"{_filename(kid)}.key"
+    path.unlink(missing_ok=True)
+    return load_or_create_key_set(directory)
+
+
+def _filename(kid: str) -> str:
+    """A thumbprint is base64url, which contains `-` and `_` but never `/`, so
+    it is already a safe filename. Asserted rather than assumed, because a `kid`
+    that reached the filesystem with a separator in it would be a path
+    traversal with our own key material as the payload."""
+    if "/" in kid or "\\" in kid or kid in {"", ".", ".."}:
+        raise ValueError(f"refusing to use {kid!r} as a filename")
+    return kid
+
+
+def _read_key(path: Path) -> SigningKey:
+    private_key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise ValueError(f"{path.name} is not an RSA private key")
+    return SigningKey(kid=thumbprint(private_key.public_key()), private_key=private_key)
+
+
+def _write_key(path: Path, key: SigningKey) -> None:
+    # Mode set at creation rather than afterwards, so the key is never briefly
+    # world-readable — the same reasoning as the SAML keypair.
+    path.touch(mode=0o600, exist_ok=True)
+    path.write_bytes(
+        key.private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )

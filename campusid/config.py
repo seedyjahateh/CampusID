@@ -187,6 +187,17 @@ class Settings(BaseSettings):
         return timedelta(seconds=self.saml_clock_skew_seconds)
 
     @property
+    def oidc_issuer(self) -> str:
+        """The `iss` in every token and the base of every advertised endpoint.
+
+        The base URL itself, with no path. An issuer that is a prefix of another
+        issuer invites the mistake where a client validating by `startswith`
+        accepts tokens from the wrong one, and OIDC Discovery derives the
+        well-known path from the issuer anyway.
+        """
+        return self.base_url
+
+    @property
     def sync_database_url(self) -> str:
         """Driver-neutral URL for tooling that cannot use asyncpg."""
         return self.database_url.replace("+asyncpg", "", 1)
