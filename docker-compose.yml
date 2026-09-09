@@ -21,6 +21,7 @@ x-broker-env: &broker-env
   CAMPUSID_SAML_KEY_DIR: /var/lib/campusid/saml
   CAMPUSID_SAML_DEFAULT_IDP: ${CAMPUSID_SAML_DEFAULT_IDP:-}
   CAMPUSID_POLICY_DIR: /app/policies
+  CAMPUSID_LIFECYCLE_RULES_FILE: /app/config/lifecycle_rules.yaml
   CAMPUSID_SCOPE: ${CAMPUSID_SCOPE:-campus.test}
   # Restore-critical. Rotating it replaces every SP's entire user base with
   # strangers at once, so it is backed up with the database. The broker refuses

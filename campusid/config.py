@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     a review diff shows one app's policy rather than every app's.
     """
 
+    lifecycle_rules_file: str = "/app/config/lifecycle_rules.yaml"
+    """Where the affiliation transition rules live (FR-LC-04).
+
+    A single file rather than a directory, unlike release policy: policy is
+    per-SP and adding an app means adding a file, while these rules describe the
+    institution and there is only one of it.
+    """
+
     scope: str = "campus.test"
     """This deployment's own scope — the domain the campus IdP is authoritative
     for. Values scoped to anything else are dropped during normalisation, and

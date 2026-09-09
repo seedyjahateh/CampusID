@@ -1,0 +1,121 @@
+# Affiliation transition rules (FR-LC-04).
+#
+# What a person's relationship to the institution entitles them to, written down
+# where the people who decide it can read it. These are registrar and HR
+# decisions, not engineering ones: "does a graduating student keep their email
+# alias" is a policy question that gets asked once a year and answered by
+# somebody who does not deploy the broker.
+#
+# The model has exactly two moving parts.
+#
+#   1. An entitlement is declared once, with its URN, its classification, and
+#      how long it survives after the affiliation that justified it goes away.
+#   2. A rule says which affiliations justify it.
+#
+# Everything else follows. A person's entitlements are the union of what their
+# current affiliations justify; when an affiliation ends, every entitlement it
+# was the only justification for is revoked, immediately or after its grace
+# period. Nothing is granted because somebody used to have it, and nothing is
+# retained because removing it looked risky.
+#
+# The grace period is the part worth understanding. `grace_days: 30` on LMS
+# access means a student who graduates in June keeps their coursework until
+# July, and then loses it whether or not anybody remembers. Zero means the
+# access ends with the affiliation.
+
+entitlements:
+  - urn: urn:mace:campus.edu:entitlement:lms:access
+    display_name: Learning management system
+    classification: internal
+    grace_days: 30
+    # Coursework does not stop mattering the day somebody graduates, and a
+    # transcript dispute in July is exactly when they need it. Thirty days is
+    # the registrar's answer, and it is here rather than in a cron job so it
+    # can be changed by the person who owns the decision.
+
+  - urn: urn:mace:campus.edu:entitlement:mail:alias
+    display_name: Lifetime email alias
+    classification: directory
+    grace_days: 0
+    # No grace period because it is never lost: alumni keep it, which is what
+    # the `alum` rule below is for. An entitlement retained by a rule needs no
+    # grace period; grace periods are for entitlements that genuinely end.
+
+  - urn: urn:mace:campus.edu:entitlement:library:eresources
+    display_name: Licensed electronic resources
+    classification: internal
+    grace_days: 0
+    # Licence terms bind this to current members. A grace period here would be
+    # a contract breach rather than a kindness.
+
+  - urn: urn:mace:campus.edu:entitlement:vpn:access
+    display_name: Campus VPN
+    classification: internal
+    grace_days: 0
+    requires_aal2: true
+    # Remote network access from an unknown device is the case AAL2 exists for.
+
+  - urn: urn:mace:campus.edu:entitlement:hr:selfservice
+    display_name: HR self-service
+    classification: restricted
+    grace_days: 7
+    requires_aal2: true
+    # A week, so somebody leaving can retrieve their own payslips and tax
+    # documents. Restricted because it is the person's own employment record.
+
+  - urn: urn:mace:campus.edu:entitlement:grants:submit
+    display_name: Research grant submission
+    classification: internal
+    grace_days: 0
+    requires_aal2: true
+
+  - urn: urn:mace:campus.edu:entitlement:alumni:portal
+    display_name: Alumni portal
+    classification: directory
+    grace_days: 0
+
+rules:
+  # Anybody currently attached to the institution in any capacity.
+  - id: members-get-mail-and-library
+    affiliations: [student, faculty, staff, employee, member]
+    grants:
+      - urn:mace:campus.edu:entitlement:mail:alias
+      - urn:mace:campus.edu:entitlement:library:eresources
+
+  - id: students-get-the-lms
+    affiliations: [student]
+    grants:
+      - urn:mace:campus.edu:entitlement:lms:access
+
+  # Teaching staff need the LMS from the other side of it.
+  - id: faculty-get-the-lms
+    affiliations: [faculty]
+    grants:
+      - urn:mace:campus.edu:entitlement:lms:access
+
+  - id: employees-get-hr-and-vpn
+    affiliations: [faculty, staff, employee]
+    grants:
+      - urn:mace:campus.edu:entitlement:hr:selfservice
+      - urn:mace:campus.edu:entitlement:vpn:access
+
+  - id: faculty-submit-grants
+    affiliations: [faculty]
+    grants:
+      - urn:mace:campus.edu:entitlement:grants:submit
+
+  # The transition the requirement names: a graduating student becomes an alum,
+  # loses the LMS after its grace period, and keeps the mail alias — because a
+  # rule still justifies the alias, not because anything was grandfathered.
+  - id: alumni-keep-mail-and-the-portal
+    affiliations: [alum]
+    grants:
+      - urn:mace:campus.edu:entitlement:mail:alias
+      - urn:mace:campus.edu:entitlement:alumni:portal
+
+  # Visitors and contractors: present, but entitled to nothing by affiliation.
+  # Written as an empty rule rather than omitted, so the answer to "what does an
+  # affiliate get?" is in the file rather than in the absence of a file.
+  - id: affiliates-get-nothing-by-default
+    affiliations: [affiliate, library-walk-in]
+    grants: []

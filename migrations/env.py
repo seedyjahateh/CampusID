@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 import campusid.audit.models
 import campusid.federation.models
 import campusid.identity.models
+import campusid.lifecycle.models
 import campusid.oidc.models
 import campusid.scim.models  # noqa: F401
 from campusid.config import get_settings

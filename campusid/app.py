@@ -17,6 +17,8 @@ from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
 from campusid.federation.registry import FederationRegistry
 from campusid.keys import load_or_create
+from campusid.lifecycle.rules import RulesStore
+from campusid.lifecycle.store import LifecycleStore
 from campusid.logging import configure_logging, get_logger
 from campusid.middleware import (
     BodySizeLimitMiddleware,
@@ -121,6 +123,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logout_http = httpx.AsyncClient()
     app.state.logout_notifier = LogoutNotifier(issuer=settings.oidc_issuer, client=logout_http)
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
+    app.state.lifecycle_rules = RulesStore(Path(settings.lifecycle_rules_file))
+    app.state.lifecycle = LifecycleStore(session_factory)
     app.state.audit = AuditLog(session_factory)
     app.state.scim_users = UserStore(
         session_factory, issuer=settings.oidc_issuer, scope=settings.scope

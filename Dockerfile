@@ -45,6 +45,10 @@ COPY scripts/entrypoint.sh ./scripts/entrypoint.sh
 # mounts nothing still has working, reviewed policy rather than an empty
 # directory — which under default-deny would release nothing to anybody.
 COPY policies/ ./policies/
+# The affiliation transition rules, for the same reason: a deployment that
+# mounts nothing still derives entitlements from reviewed rules rather than
+# from an empty file, which would revoke everybody's access at once.
+COPY config/ ./config/
 
 # Runs unprivileged with no home directory and no login shell (NFR-SEC-09).
 RUN chmod +x /app/scripts/entrypoint.sh \
