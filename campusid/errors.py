@@ -70,6 +70,17 @@ class ReasonCode(StrEnum):
     # --- Discovery ---------------------------------------------------------
     INVALID_RETURN_URL = "invalid_return_url"
 
+    # --- OIDC provider ------------------------------------------------------
+    # These are the internal half of a two-vocabulary scheme: the client is told
+    # a coarse OAuth `error`, while the audit trail records which of these it
+    # actually was. See `campusid/oidc/errors.py`.
+    REDIRECT_URI_MISMATCH = "redirect_uri_mismatch"
+    CLIENT_AUTHENTICATION_FAILED = "client_authentication_failed"
+    SCOPE_NOT_PERMITTED = "scope_not_permitted"
+    PKCE_REQUIRED = "pkce_required"
+    PKCE_METHOD_UNSUPPORTED = "pkce_method_unsupported"
+    PKCE_VERIFICATION_FAILED = "pkce_verification_failed"
+
 
 NOT_YET_REACHABLE: frozenset[ReasonCode] = frozenset()
 """Codes with no reachable code path yet, exempt from the completeness test.
