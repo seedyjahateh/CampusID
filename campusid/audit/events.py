@@ -82,6 +82,28 @@ class EventType(StrEnum):
     """FR-ARP-06 and FERPA §99.32. Every attribute considered, released or not,
     with the rule that decided it."""
 
+    # --- lifecycle ----------------------------------------------------------
+    LIFECYCLE_JOINER = "lifecycle.joiner"
+    LIFECYCLE_MOVER = "lifecycle.mover"
+    LIFECYCLE_LEAVER = "lifecycle.leaver"
+    """The three transitions, separate types rather than one with a field.
+
+    An investigation into a termination reads nothing like one into a role
+    change, and a dashboard counting deprovisionings should not have to filter a
+    generic type by a detail key to find them.
+    """
+
+    ENTITLEMENT_GRANTED = "entitlement.granted"
+    ENTITLEMENT_REVOKED = "entitlement.revoked"
+    """Both, because "when did they get it" and "when did they lose it" are the
+    two questions an access review asks, and neither is answerable from the
+    other."""
+
+    DEPROVISION_STEP = "deprovision.step"
+    """One step of FR-LC-03's ordered sequence. Recorded per step, so an
+    incomplete deprovisioning shows which step it got to rather than simply
+    being absent."""
+
     # --- administration -----------------------------------------------------
     ADMIN_ACTION = "admin.action"
     CONFIG_CHANGE = "config.change"

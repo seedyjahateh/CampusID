@@ -18,6 +18,7 @@ from campusid.db import check_database, create_engine, create_session_factory
 from campusid.federation.registry import FederationRegistry
 from campusid.identity.registry import IdentityRegistry
 from campusid.keys import load_or_create
+from campusid.lifecycle.orchestrator import LifecycleOrchestrator
 from campusid.lifecycle.rules import RulesStore
 from campusid.lifecycle.store import LifecycleStore
 from campusid.logging import configure_logging, get_logger
@@ -128,8 +129,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
+    # Provisioning drives the lifecycle: a SCIM write is what makes somebody a
+    # joiner, a mover or a leaver, and the store tells the orchestrator what
+    # changed once the write has committed.
+    app.state.lifecycle_orchestrator = LifecycleOrchestrator(
+        rules=app.state.lifecycle_rules,
+        lifecycle=app.state.lifecycle,
+        sessions=app.state.sessions,
+        grants=app.state.grants,
+        audit=app.state.audit,
+    )
     app.state.scim_users = UserStore(
-        session_factory, issuer=settings.oidc_issuer, scope=settings.scope
+        session_factory,
+        issuer=settings.oidc_issuer,
+        scope=settings.scope,
+        on_transition=app.state.lifecycle_orchestrator.transitioned,
     )
     app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
 

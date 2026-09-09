@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from campusid.config import get_settings
 from campusid.db import create_engine, create_session_factory
 from campusid.identity.models import Account, Affiliation, Identifier, Person
+from campusid.lifecycle.models import EntitlementGrant, LifecycleEvent
 from campusid.scim.bulk import BULK_REQUEST, BULK_RESPONSE
 from campusid.scim.models import ScimGroup, ScimSourceRecord
 from campusid.scim.schemas import CORE_GROUP, CORE_USER, MAX_BULK_PAYLOAD
@@ -55,7 +56,14 @@ async def sessions(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[Asyn
             delete(ScimGroup).where(ScimGroup.group_uuid.not_in(groups or {uuid.UUID(int=0)}))
         )
         keep = people or {uuid.UUID(int=0)}
-        for table in (ScimSourceRecord, Account, Identifier, Affiliation):
+        for table in (
+            LifecycleEvent,
+            EntitlementGrant,
+            ScimSourceRecord,
+            Account,
+            Identifier,
+            Affiliation,
+        ):
             await session.execute(delete(table).where(table.person_uuid.not_in(keep)))
         await session.execute(delete(Person).where(Person.person_uuid.not_in(keep)))
 

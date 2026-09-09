@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from campusid.config import get_settings
 from campusid.db import create_engine, create_session_factory
 from campusid.identity.models import Account, Affiliation, Identifier, Person
+from campusid.lifecycle.models import EntitlementGrant, LifecycleEvent
 from campusid.scim.models import ScimSourceRecord
 from campusid.scim.schemas import CAMPUS_USER, CORE_USER, ENTERPRISE_USER
 
@@ -50,7 +51,16 @@ async def sessions(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[Asyn
 
     async with factory() as session, session.begin():
         keep = pre_existing or {uuid.UUID(int=0)}
-        for table in (ScimSourceRecord, Account, Identifier, Affiliation):
+        # The lifecycle tables first: a SCIM create now grants entitlements and
+        # writes a timeline event, and both hold a foreign key to the person.
+        for table in (
+            LifecycleEvent,
+            EntitlementGrant,
+            ScimSourceRecord,
+            Account,
+            Identifier,
+            Affiliation,
+        ):
             await session.execute(delete(table).where(table.person_uuid.not_in(keep)))
         await session.execute(delete(Person).where(Person.person_uuid.not_in(keep)))
 

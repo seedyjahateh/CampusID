@@ -31,6 +31,7 @@ pretended at here.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Final
@@ -79,6 +80,13 @@ people the filter would have matched.
 
 DEFAULT_COUNT: Final = 100
 
+TransitionHook = Callable[[str, set[str], set[str]], Awaitable[Any]]
+"""Told what a write changed about somebody's affiliations, after it commits.
+
+The lifecycle's entry point from provisioning (FR-LC-01, FR-LC-02, FR-LC-03),
+kept as a callback so the store depends on nothing but the registry.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Page:
@@ -111,10 +119,31 @@ class UserStore:
         *,
         issuer: str,
         scope: str,
+        on_transition: TransitionHook | None = None,
     ) -> None:
         self._sessions = session_factory
         self._issuer = issuer
         self._scope = scope
+        self._on_transition = on_transition
+
+    async def _transitioned(
+        self, person_uuid: uuid.UUID, before: set[str], after: set[str]
+    ) -> None:
+        """Tell the lifecycle what just changed, after the write has committed.
+
+        A callback rather than a collaborator the store calls directly, because
+        the store's job is rows and the lifecycle's job is consequences —
+        entitlements, sessions, downstream systems. Wiring them together here
+        would make every SCIM test need a session store and a token store.
+
+        After the commit, deliberately. The consequences include terminating
+        sessions and revoking tokens, and doing that inside the transaction that
+        writes the person would leave somebody logged out of a change that then
+        rolled back.
+        """
+        if self._on_transition is None or before == after:
+            return
+        await self._on_transition(str(person_uuid), before, after)
 
     # --- create -----------------------------------------------------------
 
@@ -171,7 +200,14 @@ class UserStore:
                     version=resource["meta"]["version"],
                 )
             )
-            return resource, True
+            created = person.person_uuid
+            joined = {affiliation.value for affiliation in parsed.affiliations}
+
+        # FR-LC-01. Outside the transaction: the joiner path reaches downstream
+        # systems, and a directory account created inside a transaction that
+        # then rolled back would be an account for somebody who does not exist.
+        await self._transitioned(created, set(), joined)
+        return resource, True
 
     # --- read -------------------------------------------------------------
 
@@ -249,6 +285,14 @@ class UserStore:
 
             await self._assert_username_free(session, parsed.user_name, excluding=person_uuid)
 
+            # Read before the write, because "what changed" is the whole input to
+            # the lifecycle and the rows are about to stop saying what it was.
+            before = {
+                row.affiliation
+                for row in await self._affiliations(session, person_uuid)
+                if row.valid_until is None
+            }
+
             person.display_name = parsed.display_name
             person.given_name = parsed.given_name
             person.surname = parsed.surname
@@ -268,7 +312,19 @@ class UserStore:
             # where awaiting is possible.
             await session.refresh(person)
 
-            return await self._finish(session, person_uuid, source, raw)
+            resource = await self._finish(session, person_uuid, source, raw)
+            after = (
+                {affiliation.value for affiliation in parsed.affiliations}
+                if parsed.status == STATUS_ACTIVE
+                else set()
+            )
+            """`active: false` is a leaver, whatever the affiliations say. FR-LC-03
+            names both routes into deprovisioning and they mean the same thing
+            downstream, so which field the SIS happened to change must not
+            decide whether sessions get terminated."""
+
+        await self._transitioned(person_uuid, before, after)
+        return resource
 
     async def apply_patched(
         self,
@@ -313,11 +369,20 @@ class UserStore:
                     identifier.released_at = datetime.now(UTC)
                     identifier.is_primary = False
 
+            before = set()
             for affiliation in await self._affiliations(session, person_uuid):
                 if affiliation.valid_until is None:
+                    before.add(affiliation.affiliation)
                     affiliation.valid_until = date.today()
 
             log.info("scim.user.deactivated", person_uuid=str(person_uuid))
+
+        # FR-LC-03. Outside the transaction, and unconditional: a DELETE of
+        # somebody with no affiliations still has to end their sessions and
+        # revoke their tokens, so this does not go through the `before == after`
+        # shortcut that skips a no-op change.
+        if self._on_transition is not None:
+            await self._on_transition(str(person_uuid), before, set())
 
     # --- helpers ----------------------------------------------------------
 

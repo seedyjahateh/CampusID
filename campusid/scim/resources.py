@@ -393,10 +393,22 @@ def _primary(identifiers: list[Identifier], id_type: str) -> str | None:
     Falling back to a non-primary matters: an identifier issued before the
     concept of primary existed, or one whose primary was released, would
     otherwise make the record look like it has no ePPN at all.
+
+    And falling back to a *released* one matters more. A soft-deleted person has
+    every identifier tombstoned, so a live-only lookup returns nothing — and
+    `userName` is required, which would make a deprovisioned person's record
+    unrepresentable in the API that deprovisioned them. What they were called is
+    a historical fact and the resource still exists; the tombstone stops the
+    value being reissued, not being remembered.
     """
-    live = [i for i in identifiers if i.id_type == id_type and i.released_at is None]
-    primary = next((i.value for i in live if i.is_primary), None)
-    return primary or next((i.value for i in live), None)
+    of_type = [i for i in identifiers if i.id_type == id_type]
+    live = [i for i in of_type if i.released_at is None]
+    for candidates in (live, of_type):
+        primary = next((i.value for i in candidates if i.is_primary), None)
+        chosen = primary or next((i.value for i in candidates), None)
+        if chosen is not None:
+            return chosen
+    return None
 
 
 def _current(affiliations: list[Affiliation]) -> list[Affiliation]:
