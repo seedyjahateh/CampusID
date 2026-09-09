@@ -22,6 +22,17 @@ python-multipart==0.0.32
 # Fetching peer metadata: by federation-init now, by the refresh job in M2.
 httpx==0.28.1
 
+# --- Directory (M4) --------------------------------------------------------
+# ldap3 is pure Python, so the image keeps the no-native-build property that
+# ADR-003 chose signxml for. python-ldap would pull in libldap and openldap
+# headers and cost the multi-arch build.
+#
+# It is synchronous, which is deliberate rather than overlooked: the directory
+# calls run in a worker thread. An async LDAP client would mean either Twisted
+# or a hand-written ASN.1 codec, and neither is a trade this project should
+# make for an integration that does one search per login.
+ldap3==2.9.1
+
 # --- OIDC and policy (M2) --------------------------------------------------
 # Attribute release policy is declarative YAML (FR-ARP-01). Loaded with
 # `safe_load` only — `yaml.load` constructs arbitrary Python objects, which

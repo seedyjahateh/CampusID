@@ -82,6 +82,13 @@ ignore_missing_imports = true
 module = ["fakeredis.*"]
 ignore_missing_imports = true
 
+# ldap3 ships no type information and has no stub package. The directory client
+# is the only module that touches it, and it converts every value it reads into
+# our own types at that boundary — so the untyped surface is one file wide.
+[[tool.mypy.overrides]]
+module = ["ldap3.*"]
+ignore_missing_imports = true
+
 # signxml is typed but re-exports its public names through __init__ without an
 # __all__, which strict mode's no_implicit_reexport rejects. Importing from the
 # private submodules instead would couple us to its internal layout.
