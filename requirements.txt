@@ -21,3 +21,9 @@ cryptography==50.0.1
 python-multipart==0.0.32
 # Fetching peer metadata: by federation-init now, by the refresh job in M2.
 httpx==0.28.1
+
+# --- OIDC and policy (M2) --------------------------------------------------
+# Attribute release policy is declarative YAML (FR-ARP-01). Loaded with
+# `safe_load` only — `yaml.load` constructs arbitrary Python objects, which
+# turns a policy file into a code-execution surface.
+pyyaml==6.0.2

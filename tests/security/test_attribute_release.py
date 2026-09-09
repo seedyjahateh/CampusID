@@ -396,3 +396,75 @@ def test_decisions_are_deterministic_in_order() -> None:
     second = evaluate(policy, SAM, HELD)
 
     assert [d.attribute for d in first.decisions] == [d.attribute for d in second.decisions]
+
+
+# --- consent (FR-ARP-01, the `require-consent` rule kind) -------------------
+
+
+def test_an_attribute_requiring_consent_is_withheld_by_default() -> None:
+    """Fails closed. An attribute nobody has consented to is simply not
+    released, so a consent store that is empty, unreachable, or not yet built
+    cannot cause a disclosure."""
+    policy = ReleasePolicy("https://sp.test", rules=(ReleaseRule("c", "require-consent", MAIL),))
+
+    result = evaluate(policy, SAM, HELD)
+
+    assert MAIL not in result.attributes
+    assert _basis(result, MAIL) is Basis.CONSENT_REQUIRED
+
+
+def test_consent_releases_the_attribute() -> None:
+    policy = ReleasePolicy("https://sp.test", rules=(ReleaseRule("c", "require-consent", MAIL),))
+
+    result = evaluate(policy, SAM, HELD, consented=frozenset({MAIL}))
+
+    assert result.attributes[MAIL] == HELD[MAIL]
+    assert _basis(result, MAIL) is Basis.CONSENT_GIVEN
+
+
+def test_consent_is_recorded_as_its_own_basis_not_as_a_denial() -> None:
+    """An SP told "denied" stops asking; one told "consent required" can
+    prompt. Collapsing the two loses the only difference that matters to the
+    person deciding."""
+    policy = ReleasePolicy("https://sp.test", rules=(ReleaseRule("c", "require-consent", MAIL),))
+
+    assert _basis(evaluate(policy, SAM, HELD), MAIL) is not Basis.EXPLICIT_DENY
+
+
+def test_consent_does_not_override_ferpa_suppression() -> None:
+    """Suppression runs ahead of every rule. A student who opted out of the
+    directory has not consented to it by consenting to something else, and a
+    consent record predating the opt-out must not resurrect the release."""
+    policy = ReleasePolicy("https://sp.test", rules=(ReleaseRule("c", "require-consent", MAIL),))
+
+    result = evaluate(policy, SUPPRESSED, HELD, consented=frozenset({MAIL}))
+
+    assert MAIL not in result.attributes
+    assert _basis(result, MAIL) is Basis.FERPA_SUPPRESSED
+
+
+def test_consent_cannot_release_an_education_record() -> None:
+    """Nothing overrides classification, consent included. A student agreeing to
+    disclose their student number does not make it disclosable."""
+    policy = ReleasePolicy(
+        "https://sp.test", rules=(ReleaseRule("c", "require-consent", STUDENT_ID),)
+    )
+
+    result = evaluate(policy, SAM, HELD, consented=frozenset({STUDENT_ID}))
+
+    assert STUDENT_ID not in result.attributes
+    assert _basis(result, STUDENT_ID) is Basis.RESTRICTED
+
+
+def test_consent_for_one_attribute_does_not_release_another() -> None:
+    policy = ReleasePolicy(
+        "https://sp.test",
+        rules=(
+            ReleaseRule("c1", "require-consent", MAIL),
+            ReleaseRule("c2", "require-consent", DISPLAY_NAME),
+        ),
+    )
+
+    result = evaluate(policy, SAM, HELD, consented=frozenset({MAIL}))
+
+    assert set(result.attributes) == {MAIL}

@@ -20,6 +20,12 @@ x-broker-env: &broker-env
   CAMPUSID_LOG_FORMAT: ${CAMPUSID_LOG_FORMAT:-json}
   CAMPUSID_SAML_KEY_DIR: /var/lib/campusid/saml
   CAMPUSID_SAML_DEFAULT_IDP: ${CAMPUSID_SAML_DEFAULT_IDP:-}
+  CAMPUSID_POLICY_DIR: /app/policies
+  CAMPUSID_SCOPE: ${CAMPUSID_SCOPE:-campus.test}
+  # Restore-critical. Rotating it replaces every SP's entire user base with
+  # strangers at once, so it is backed up with the database. The broker refuses
+  # to start in production while it still holds this development value.
+  CAMPUSID_PAIRWISE_SALT: ${CAMPUSID_PAIRWISE_SALT:-dev-only-pairwise-salt-replace-in-production}
   TZ: UTC
 
 services:

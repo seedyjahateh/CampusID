@@ -70,6 +70,25 @@ class Settings(BaseSettings):
     """entityID used by `/saml/sso` when the caller names none. Optional: with
     several IdPs registered, discovery (M1b) chooses instead."""
 
+    # --- Attribute release ------------------------------------------------
+    policy_dir: str = "/app/policies"
+    """Where the per-SP release policy files live (FR-ARP-01).
+
+    A directory rather than a single file, so adding an SP is adding a file and
+    a review diff shows one app's policy rather than every app's.
+    """
+
+    scope: str = "campus.test"
+    """This deployment's own scope — the domain the campus IdP is authoritative
+    for. Values scoped to anything else are dropped during normalisation, and
+    it is the suffix on every subject identifier the broker issues."""
+
+    pairwise_salt: str = "dev-only-pairwise-salt-replace-in-production"
+    """Restore-critical. Changing it replaces every SP's entire user base with
+    strangers simultaneously, so it is backed up with the database and rotating
+    it is a coordinated migration rather than an operation. The default exists
+    so the dev stack starts; production must override it."""
+
     # --- Protocol parameters (validated here, enforced in M1+) -----------
     saml_clock_skew_seconds: int = Field(default=180, ge=0, le=300)
     """Assertion time-condition tolerance.
@@ -122,9 +141,26 @@ class Settings(BaseSettings):
             raise ValueError(f"unknown {ENV_PREFIX}* environment variable(s): {', '.join(unknown)}")
         return self
 
+    @model_validator(mode="after")
+    def _require_a_real_pairwise_salt_in_production(self) -> Self:
+        """The dev default must never reach production.
+
+        Everyone would derive the same identifiers from it, so an SP could
+        compute another SP's identifier for a chosen user — which is the single
+        property pairwise identifiers exist to provide. Checked at startup
+        because there is no later moment anybody would notice.
+        """
+        if self.environment is Environment.PRODUCTION and self.pairwise_salt.startswith("dev-only"):
+            raise ValueError("pairwise_salt still holds its development default")
+        return self
+
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.PRODUCTION
+
+    @property
+    def pairwise_salt_bytes(self) -> bytes:
+        return self.pairwise_salt.encode("utf-8")
 
     # All four derive from `base_url`, so there is exactly one place a
     # deployment's identity is configured. An entityID that drifted from the

@@ -41,6 +41,10 @@ COPY alembic.ini ./
 COPY campusid/ ./campusid/
 COPY migrations/ ./migrations/
 COPY scripts/entrypoint.sh ./scripts/entrypoint.sh
+# The shipped release policies. Baked into the image so a deployment that
+# mounts nothing still has working, reviewed policy rather than an empty
+# directory — which under default-deny would release nothing to anybody.
+COPY policies/ ./policies/
 
 # Runs unprivileged with no home directory and no login shell (NFR-SEC-09).
 RUN chmod +x /app/scripts/entrypoint.sh \

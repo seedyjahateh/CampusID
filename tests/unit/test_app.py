@@ -32,7 +32,7 @@ def test_docs_are_available_outside_production(settings: Settings) -> None:
 
 def test_docs_are_disabled_in_production() -> None:
     """The schema enumerates every endpoint; it is an operator affordance."""
-    app = create_app(Settings(environment=Environment.PRODUCTION))
+    app = create_app(Settings(environment=Environment.PRODUCTION, pairwise_salt="a-real-salt"))
 
     assert app.docs_url is None
     assert app.openapi_url is None

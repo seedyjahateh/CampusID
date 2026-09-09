@@ -45,7 +45,7 @@ from campusid.policy.attributes import (
     definition,
 )
 
-Effect = Literal["allow", "allow-value", "deny"]
+Effect = Literal["allow", "allow-value", "deny", "require-consent"]
 SubjectIdMode = Literal["pairwise", "shared"]
 
 
@@ -63,6 +63,12 @@ class Basis(StrEnum):
     EXPLICIT_ALLOW = "explicit_allow"
     VALUE_FILTER = "value_filter"
     ENTITY_CATEGORY = "entity_category"
+    CONSENT_GIVEN = "consent_given"
+    CONSENT_REQUIRED = "consent_required"
+    """Withheld pending the subject's decision. Distinct from a denial: nothing
+    is wrong, and the same request will succeed once they agree. An SP told
+    "denied" would stop asking; one told "consent required" can prompt."""
+
     DEFAULT_DENY = "default_deny"
 
 
@@ -151,19 +157,27 @@ def evaluate(
     policy: ReleasePolicy,
     subject: Subject,
     available: dict[str, list[str]],
+    *,
+    consented: frozenset[str] = frozenset(),
 ) -> ReleaseResult:
     """Decide what this SP may see of this subject.
 
     ``available`` is everything the broker holds; the result is the subset the
     SP is entitled to. Attributes the broker does not hold are simply absent —
     a policy may permit an attribute nobody has.
+
+    ``consented`` names the attributes this subject has already agreed to
+    release to this SP. It is passed in rather than looked up so the engine
+    stays a pure function of its inputs: consent lives in a store with its own
+    lifecycle, and a policy decision that reached into a database would be
+    untestable at the granularity the negative suite needs.
     """
     decisions: list[Decision] = []
     released: dict[str, list[str]] = {}
 
     for name in sorted(available):
         values = tuple(available[name])
-        decision = _decide(policy, subject, name, values)
+        decision = _decide(policy, subject, name, values, consented)
         decisions.append(decision)
         if decision.released and decision.values:
             released[name] = list(decision.values)
@@ -172,7 +186,11 @@ def evaluate(
 
 
 def _decide(
-    policy: ReleasePolicy, subject: Subject, name: str, values: tuple[str, ...]
+    policy: ReleasePolicy,
+    subject: Subject,
+    name: str,
+    values: tuple[str, ...],
+    consented: frozenset[str],
 ) -> Decision:
     attribute = definition(name)
 
@@ -198,6 +216,15 @@ def _decide(
             return Decision(name, False, (), Basis.EXPLICIT_DENY, rule.id)
         if rule.effect == "allow":
             return Decision(name, True, values, Basis.EXPLICIT_ALLOW, rule.id)
+        if rule.effect == "require-consent":
+            # Withheld until the subject agrees, and recorded as its own basis
+            # so an SP can be told "ask them" rather than "no". Fails closed:
+            # an attribute nobody has consented to is simply not released, so a
+            # consent store that is empty, unreachable or not yet built cannot
+            # cause a disclosure.
+            if name in consented:
+                return Decision(name, True, values, Basis.CONSENT_GIVEN, rule.id)
+            return Decision(name, False, (), Basis.CONSENT_REQUIRED, rule.id)
         # allow-value: the attribute passes, but only the values that match.
         # A partial release is still a release, and the values that did not
         # survive are recorded on the decision.

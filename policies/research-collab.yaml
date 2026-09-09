@@ -1,0 +1,33 @@
+# An external research collaboration platform.
+#
+# The case for `require-consent` and for a shared subject identifier, which are
+# the two settings a reviewer should always ask about.
+sp_entity_id: https://collab.research.example/sp
+display_name: Research Collaboration Platform
+
+entity_categories:
+  - http://refeds.org/category/research-and-scholarship
+
+# Shared rather than pairwise, deliberately, and this is the justification an SP
+# has to produce to get it: co-authors have to be able to find each other by the
+# same identifier across the several services a collaboration uses. A pairwise
+# identifier would make one person look like several people.
+subject_id_mode: shared
+
+# Not a campus system, so the school-official exception does not apply: a
+# suppressed student's directory information is withheld here.
+internal_school_official: false
+
+rules:
+  # ORCID is the researcher's own public identifier, and whether to link it to
+  # this platform is genuinely their decision rather than the university's.
+  - id: collab-orcid-on-consent
+    effect: require-consent
+    attribute: urn:oid:1.3.6.1.4.1.5923.1.1.1.16
+
+  # Withheld from an external party regardless of the R&S bundle. Which building
+  # someone works in is not research metadata.
+  - id: collab-no-org-unit
+    effect: deny
+    attribute: urn:oid:2.5.4.11
+    precedence: 5

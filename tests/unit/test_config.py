@@ -87,7 +87,29 @@ def test_redis_url_scheme_is_validated() -> None:
 
 
 def test_production_flag() -> None:
-    assert Settings(environment=Environment.PRODUCTION).is_production is True
+    settings = Settings(environment=Environment.PRODUCTION, pairwise_salt="a-real-salt")
+
+    assert settings.is_production is True
+
+
+def test_production_refuses_the_development_pairwise_salt() -> None:
+    """Every deployment would derive the same identifiers from it, so one SP
+    could compute another's identifier for a chosen user — which is the single
+    property pairwise identifiers exist to provide. Checked at startup because
+    there is no later moment anybody would notice."""
+    with pytest.raises(ValidationError, match="pairwise_salt"):
+        Settings(environment=Environment.PRODUCTION)
+
+
+def test_development_keeps_its_default_salt() -> None:
+    """The dev stack has to start without ceremony, or nobody runs it."""
+    assert Settings().pairwise_salt.startswith("dev-only")
+
+
+def test_the_pairwise_salt_is_available_as_bytes() -> None:
+    """The derivation is an HMAC key, and encoding it at every call site is how
+    two call sites end up disagreeing about the encoding."""
+    assert Settings(pairwise_salt="salty").pairwise_salt_bytes == b"salty"
 
 
 def test_settings_are_immutable() -> None:
