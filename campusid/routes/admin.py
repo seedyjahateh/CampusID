@@ -31,7 +31,7 @@ defaulted, because a default reason is a field everybody stops reading.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import httpx
@@ -39,6 +39,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response, StreamingResponse
 
+from campusid.audit.dashboard import DEFAULT_STEP, DEFAULT_WINDOW, Window
+from campusid.audit.dashboard import as_json as dashboard_json
 from campusid.audit.events import EventType, Outcome
 from campusid.audit.export import CONTENT_TYPE, filename, ndjson
 from campusid.audit.query import DEFAULT_LIMIT, Query, as_json
@@ -48,6 +50,7 @@ from campusid.errors import MetadataRejected, ReasonCode
 from campusid.logging import get_logger
 from campusid.mfa import assurance
 from campusid.saml.parser import MAX_DOCUMENT_BYTES
+from campusid.saml.stores import utcnow
 from campusid.session.cookies import SESSION_COOKIE, set_session_cookie
 
 log = get_logger(__name__)
@@ -394,6 +397,62 @@ async def subject_timeline(subject: str, request: Request) -> JSONResponse:
         {"subject": subject, "events": [as_json(event) for event in events]},
         headers=NO_STORE,
     )
+
+
+@router.get("/dashboard")
+async def dashboard(request: Request) -> JSONResponse:
+    """Every panel for one window, in one read (FR-AUD-07).
+
+    One call rather than seven endpoints, because a dashboard drawn from seven
+    separate reads shows seven slightly different moments — and the one thing
+    worse than a stale number is a set of numbers that cannot all have been true
+    at once.
+
+    Everything is derived from the audit trail rather than from a separate
+    metrics store. That costs read performance and buys the property that
+    matters: when the console and the trail disagree, one of them is wrong, and
+    there is only one of them.
+    """
+    try:
+        await _admin(request, roles=READERS)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    try:
+        window = _window_from(request)
+    except ValueError as exc:
+        return _refuse({"error": "invalid_request", "detail": str(exc)}, 400)
+
+    return JSONResponse(
+        {
+            "window": {
+                "since": window.since.isoformat(),
+                "until": window.until.isoformat(),
+                "step_seconds": int(window.step.total_seconds()),
+            },
+            **dashboard_json(await request.app.state.dashboard.panels(window)),
+        },
+        headers=NO_STORE,
+    )
+
+
+def _window_from(request: Request) -> Window:
+    """The span a dashboard request covers.
+
+    Defaults to the last week at hourly resolution, which is the shape somebody
+    opening a console without asking for anything means. The ceiling is applied
+    by the store rather than here, so a caller is clamped rather than refused.
+    """
+    params = request.query_params
+    until = _moment(params.get("until")) or utcnow()
+    since = _moment(params.get("since")) or until - DEFAULT_WINDOW
+    step = timedelta(seconds=_int(params.get("step"), default=int(DEFAULT_STEP.total_seconds())))
+
+    if since >= until:
+        raise ValueError("the window ends before it starts")
+    if step <= timedelta(0):
+        raise ValueError("a bucket has to have a width")
+    return Window(since=since, until=until, step=step)
 
 
 @router.get("/audit/export")

@@ -23,6 +23,7 @@ from fakeredis import aioredis
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from campusid.audit.dashboard import Panels, Window
 from campusid.audit.events import EventType
 from campusid.audit.models import AuditEventRecord
 from campusid.audit.query import Page, Query
@@ -119,6 +120,7 @@ def wired(
     app.state.sessions = SessionStore(redis)
     app.state.role_assignments = assignments
     app.state.audit_query = queries
+    app.state.dashboard = _Dashboard()
     app.state.audit = RecordingAuditLog()
     app.state.registry = None
     return app
@@ -317,6 +319,122 @@ async def test_events_carry_their_chain_columns(http: AsyncClient, wired: FastAP
 
 async def test_the_trail_is_not_cacheable(http: AsyncClient, wired: FastAPI) -> None:
     response = await http.get("/admin/audit", cookies=await _session(wired))
+
+    assert response.headers["cache-control"] == "no-store"
+
+
+# --- the dashboard (FR-AUD-07) ----------------------------------------------
+
+
+class _Dashboard:
+    def __init__(self) -> None:
+        self.windows: list[Window] = []
+
+    async def panels(self, window: Window, *, drift: int = 0) -> Panels:
+        self.windows.append(window)
+        return Panels()
+
+
+async def test_the_dashboard_needs_a_session(http: AsyncClient) -> None:
+    assert (await http.get("/admin/dashboard")).status_code == 401
+
+
+async def test_an_auditor_may_see_the_dashboard(
+    http: AsyncClient, wired: FastAPI, assignments: _Assignments
+) -> None:
+    assignments.roles = {AUDITOR_ROLE}
+
+    assert (await http.get("/admin/dashboard", cookies=await _session(wired))).status_code == 200
+
+
+async def test_the_default_window_is_the_last_week(http: AsyncClient, wired: FastAPI) -> None:
+    """The shape somebody opening a console without asking for anything means."""
+    board = _Dashboard()
+    wired.state.dashboard = board
+
+    await http.get("/admin/dashboard", cookies=await _session(wired))
+
+    asked = board.windows[0]
+    assert asked.until - asked.since == timedelta(days=7)
+    assert asked.step == timedelta(hours=1)
+
+
+async def test_a_window_can_be_asked_for(http: AsyncClient, wired: FastAPI) -> None:
+    board = _Dashboard()
+    wired.state.dashboard = board
+
+    await http.get(
+        "/admin/dashboard",
+        params={"since": "2026-09-01", "until": "2026-09-03", "step": "3600"},
+        cookies=await _session(wired),
+    )
+
+    asked = board.windows[0]
+    assert asked.since == datetime(2026, 9, 1, tzinfo=UTC)
+    assert asked.until == datetime(2026, 9, 3, tzinfo=UTC)
+
+
+async def test_a_backwards_window_is_refused(http: AsyncClient, wired: FastAPI) -> None:
+    board = _Dashboard()
+    wired.state.dashboard = board
+
+    response = await http.get(
+        "/admin/dashboard",
+        params={"since": "2026-09-05", "until": "2026-09-01"},
+        cookies=await _session(wired),
+    )
+
+    assert response.status_code == 400
+    assert board.windows == []
+
+
+@pytest.mark.parametrize("step", ["0", "-60", "hourly"])
+async def test_a_nonsense_bucket_is_refused(http: AsyncClient, wired: FastAPI, step: str) -> None:
+    """A bucket of zero width is a loop that never ends, and a negative one is a
+    window that walks backwards."""
+    wired.state.dashboard = _Dashboard()
+
+    response = await http.get(
+        "/admin/dashboard", params={"step": step}, cookies=await _session(wired)
+    )
+
+    assert response.status_code == 400
+
+
+async def test_the_dashboard_says_which_window_it_drew(http: AsyncClient, wired: FastAPI) -> None:
+    """A chart with no stated range is a chart nobody can compare against
+    another."""
+    wired.state.dashboard = _Dashboard()
+
+    body = (await http.get("/admin/dashboard", cookies=await _session(wired))).json()
+
+    assert "since" in body["window"]
+    assert body["window"]["step_seconds"] == 3600
+
+
+async def test_every_panel_is_present_even_when_empty(http: AsyncClient, wired: FastAPI) -> None:
+    """An absent panel and an empty one look the same in a browser, and only one
+    of them is a broken console."""
+    wired.state.dashboard = _Dashboard()
+
+    body = (await http.get("/admin/dashboard", cookies=await _session(wired))).json()
+
+    assert set(body) >= {
+        "logins_by_idp",
+        "logins_by_protocol",
+        "factor_mix",
+        "top_relying_parties",
+        "provisioning_latency_seconds",
+        "failed_auth",
+        "deprovisioning_sla",
+        "drift",
+    }
+
+
+async def test_the_dashboard_is_not_cacheable(http: AsyncClient, wired: FastAPI) -> None:
+    wired.state.dashboard = _Dashboard()
+
+    response = await http.get("/admin/dashboard", cookies=await _session(wired))
 
     assert response.headers["cache-control"] == "no-store"
 
