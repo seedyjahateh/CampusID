@@ -33,6 +33,7 @@ from tests.support.audit import RecordingAuditLog
 pytestmark = pytest.mark.security
 
 PERSON = "6f9619ff-8b86-4d01-b42d-00cf4fc964ff"
+LOGIN = "sam.obrien@campus.test"
 LMS = "urn:mace:campus.edu:entitlement:lms:access"
 TODAY = date(2026, 6, 30)
 
@@ -94,8 +95,29 @@ class _Target:
         self._trace = trace
         self.name = name
 
-    async def disable(self, person_uuid: str) -> None:
+    async def disable(self, login: str) -> None:
         self._trace.steps.append(f"disable:{self.name}")
+
+
+class _Identifier:
+    def __init__(self, value: str, *, released: bool = False) -> None:
+        self.id_type = "eppn"
+        self.value = value
+        self.released_at = object() if released else None
+
+
+class _Identity:
+    """The registry, reduced to the one question a deprovisioning asks of it."""
+
+    def __init__(self, identifiers: list[_Identifier] | None = None) -> None:
+        self._identifiers = identifiers if identifiers is not None else [_Identifier(LOGIN)]
+
+    async def identifiers(
+        self, person_uuid: str, *, include_released: bool = False
+    ) -> list[_Identifier]:
+        if include_released:
+            return self._identifiers
+        return [row for row in self._identifiers if row.released_at is None]
 
 
 @pytest.fixture
@@ -115,6 +137,7 @@ def _orchestrator(
     *,
     sids: list[str] | None = None,
     targets: tuple[Any, ...] = (),
+    identity: _Identity | None = None,
 ) -> LifecycleOrchestrator:
     return LifecycleOrchestrator(
         rules=_Rules(rules),
@@ -123,6 +146,7 @@ def _orchestrator(
         grants=_Grants(trace),
         audit=audit,
         targets=targets,
+        identity=identity if identity is not None else _Identity(),
     )
 
 
@@ -209,6 +233,98 @@ async def test_the_disable_step_is_recorded_even_with_no_targets(
         and event.detail["step"] == DISABLE_ACCOUNTS
     )
     assert disable.detail["targets"] == []
+
+
+async def test_a_tombstoned_login_still_reaches_the_directory(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """The ordinary case for a leaver, and the one that quietly does nothing if
+    it is missed.
+
+    Provisioning releases a person's identifiers before this runs, so by the time
+    the directory has to be told, the ePPN is tombstoned. Using it is safe here
+    and nowhere else: FR-LC-08 guarantees an ePPN is never reassigned, so the
+    tombstone still names exactly one person. Without the fallback a SCIM delete
+    would leave the directory account enabled while the trail said the step ran.
+    """
+    orchestrator = _orchestrator(
+        trace,
+        rules,
+        audit,
+        targets=(_Target(trace, "ldap"),),
+        identity=_Identity([_Identifier(LOGIN, released=True)]),
+    )
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert "disable:ldap" in trace.steps
+
+
+async def test_a_live_login_is_preferred_over_a_tombstoned_one(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """Somebody who was renamed holds both. The current one is what the
+    directory answers to."""
+    captured: list[str] = []
+
+    class _Recording(_Target):
+        async def disable(self, login: str) -> None:
+            captured.append(login)
+
+    orchestrator = _orchestrator(
+        trace,
+        rules,
+        audit,
+        targets=(_Recording(trace, "ldap"),),
+        identity=_Identity(
+            [_Identifier("old.name@campus.test", released=True), _Identifier(LOGIN)]
+        ),
+    )
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert captured == [LOGIN]
+
+
+async def test_a_person_with_no_login_skips_the_targets(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """Nothing downstream can be addressed without one, and inventing a login to
+    try would be guessing at somebody else's namespace. The step still runs and
+    says why it did nothing."""
+    orchestrator = _orchestrator(
+        trace, rules, audit, targets=(_Target(trace, "ldap"),), identity=_Identity([])
+    )
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert "disable:ldap" not in trace.steps
+    disable = next(
+        event
+        for event in audit.events
+        if event.event_type is EventType.DEPROVISION_STEP
+        and event.detail["step"] == DISABLE_ACCOUNTS
+    )
+    assert disable.detail["reason"] == "no login"
+
+
+async def test_a_failing_target_is_not_swallowed(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """A step that absorbed the error would leave an enabled account behind with
+    a trail saying it was disabled, which is worse than a visible failure by the
+    whole width of the audit trail."""
+
+    class _Broken(_Target):
+        async def disable(self, login: str) -> None:
+            raise RuntimeError("directory unreachable")
+
+    orchestrator = _orchestrator(trace, rules, audit, targets=(_Broken(trace, "ldap"),))
+
+    with pytest.raises(RuntimeError):
+        await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert "entitlements" not in trace.steps, "the run stopped at the failing step"
 
 
 async def test_a_leaver_event_summarises_the_run(

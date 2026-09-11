@@ -24,7 +24,9 @@ import pytest
 from ldap3 import ALL, Connection, Server
 
 from campusid.directory.client import DirectoryClient, DirectoryUnavailable
+from campusid.directory.connection import Connector
 from campusid.directory.profiles import OPENLDAP
+from campusid.directory.writes import DirectoryWriter, PersonSpec
 
 pytestmark = [pytest.mark.integration, pytest.mark.directory]
 
@@ -170,8 +172,14 @@ async def test_direct_membership_is_distinguishable(client: DirectoryClient) -> 
 
 
 async def test_the_reverse_search_is_what_answers_here(client: DirectoryClient) -> None:
-    """This OpenLDAP has no `memberof` overlay, which is the common case rather
-    than a corner — so the fallback is not a fallback in most deployments."""
+    """The fixture's entries carry no `memberOf`, so this exercises the fallback.
+
+    Which is the point of having it. `memberOf` is maintained by an overlay, and
+    whether a given deployment has it configured — and whether it was configured
+    before the groups were created — is not something the broker gets to assume.
+    A client that only read the attribute would work against one campus
+    directory and find nobody in anything at the next.
+    """
     user = await client.find_user("sam.obrien")
 
     assert user is not None
@@ -233,6 +241,119 @@ async def test_an_unreachable_directory_is_unhealthy() -> None:
     )
 
     assert not await unreachable.healthy()
+
+
+# --- writing (FR-DIR-06) ----------------------------------------------------
+
+
+@pytest.fixture
+def writer() -> DirectoryWriter:
+    return DirectoryWriter(
+        profile=OPENLDAP,
+        base_dn=BASE,
+        connector=Connector(
+            url=LDAP_URL,
+            bind_dn=ADMIN,
+            bind_password=PASSWORD,
+            start_tls=False,
+            allow_plaintext=True,
+        ),
+    )
+
+
+@pytest.fixture
+async def joiner(writer: DirectoryWriter, admin: Any) -> AsyncIterator[PersonSpec]:
+    spec = PersonSpec(
+        uid=f"joiner-{uuid.uuid4().hex[:8]}",
+        given_name="New",
+        surname="Joiner",
+        mail="new.joiner@campus.test",
+        display_name="New Joiner",
+    )
+    yield spec
+    admin.delete(writer.dn_for(spec.uid))
+
+
+async def test_a_person_is_created_in_the_directory(
+    writer: DirectoryWriter, joiner: PersonSpec
+) -> None:
+    result = await writer.ensure_person(joiner)
+
+    assert result.changed
+
+
+async def test_creating_the_same_person_twice_is_a_no_op(
+    writer: DirectoryWriter, joiner: PersonSpec
+) -> None:
+    """FR-DIR-06 against a server that really refuses a duplicate DN. The unit
+    test proves we check first; this proves the server agrees about what
+    "already there" means."""
+    first = await writer.ensure_person(joiner)
+    second = await writer.ensure_person(joiner)
+
+    assert first.changed
+    assert not second.changed
+
+
+async def test_a_modify_writes_only_what_differs(
+    writer: DirectoryWriter, joiner: PersonSpec
+) -> None:
+    await writer.ensure_person(joiner)
+    dn = writer.dn_for(joiner.uid)
+
+    changed = await writer.modify(dn, {"mail": ["moved@campus.test"]})
+    again = await writer.modify(dn, {"mail": ["moved@campus.test"]})
+
+    assert changed.changed
+    assert not again.changed
+
+
+async def test_disabling_locks_the_account(
+    writer: DirectoryWriter, joiner: PersonSpec, admin: Any
+) -> None:
+    """OpenLDAP's half of FR-LC-03's first step. The ppolicy sentinel means
+    locked with no expiry — a real timestamp would unlock the account when it
+    passed, which for a deprovisioning is precisely wrong."""
+    await writer.ensure_person(joiner)
+    dn = writer.dn_for(joiner.uid)
+
+    result = await writer.disable(dn)
+
+    assert result.changed
+    admin.search(dn, "(objectClass=*)", search_scope="BASE", attributes=["pwdAccountLockedTime"])
+    assert admin.response[0]["attributes"]["pwdAccountLockedTime"]
+
+
+async def test_disabling_twice_is_a_no_op(writer: DirectoryWriter, joiner: PersonSpec) -> None:
+    """Deprovisioning is retried, so this is the ordinary case rather than a
+    corner."""
+    await writer.ensure_person(joiner)
+    dn = writer.dn_for(joiner.uid)
+
+    await writer.disable(dn)
+    second = await writer.disable(dn)
+
+    assert not second.changed
+
+
+async def test_a_disabled_entry_is_still_there(
+    writer: DirectoryWriter, joiner: PersonSpec, client: DirectoryClient
+) -> None:
+    """Nothing is deleted. The audit trail has to go on naming them, and an
+    entry that is gone cannot be shown to have been disabled."""
+    await writer.ensure_person(joiner)
+    await writer.disable(writer.dn_for(joiner.uid))
+
+    assert await client.find_user(joiner.uid) is not None
+
+
+async def test_disabling_somebody_who_is_not_there_is_refused(
+    writer: DirectoryWriter,
+) -> None:
+    """Reporting success would let a deprovisioning claim to have disabled
+    somebody who was never provisioned."""
+    with pytest.raises(DirectoryUnavailable):
+        await writer.disable(f"uid=never-existed-{uuid.uuid4().hex[:8]},{PEOPLE}")
 
 
 async def test_an_unreachable_directory_raises_rather_than_answering() -> None:

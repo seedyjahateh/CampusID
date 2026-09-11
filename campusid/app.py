@@ -17,7 +17,9 @@ from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
 from campusid.directory.client import DirectoryClient
+from campusid.directory.connection import Connector
 from campusid.directory.profiles import profile as directory_profile
+from campusid.directory.writes import DirectoryWriter
 from campusid.federation.registry import FederationRegistry
 from campusid.identity.registry import IdentityRegistry
 from campusid.keys import load_or_create
@@ -25,6 +27,7 @@ from campusid.lifecycle.orchestrator import LifecycleOrchestrator
 from campusid.lifecycle.rules import RulesStore
 from campusid.lifecycle.store import LifecycleStore
 from campusid.lifecycle.sweeper import GraceSweeper
+from campusid.lifecycle.targets import LdapTarget
 from campusid.logging import configure_logging, get_logger
 from campusid.middleware import (
     BodySizeLimitMiddleware,
@@ -133,6 +136,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
+
+    # The directory, when one is configured. Absent is a state an operator
+    # chose, so it is not an error — but a *misconfigured* one is, which is why
+    # the profile name is validated at startup rather than at first search.
+    app.state.directory = _directory(settings, redis)
+    app.state.directory_writer = _directory_writer(settings, app.state.directory)
+    if app.state.directory is not None:
+        # Reported rather than fatal. FR-DIR-08 asks that a directory outage
+        # degrade to cached group data, and a readiness probe that failed on it
+        # would take the broker out of rotation for something it can survive.
+        app.state.readiness_probes["directory"] = app.state.directory.healthy
+
     # Provisioning drives the lifecycle: a SCIM write is what makes somebody a
     # joiner, a mover or a leaver, and the store tells the orchestrator what
     # changed once the write has committed.
@@ -142,6 +157,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sessions=app.state.sessions,
         grants=app.state.grants,
         audit=app.state.audit,
+        identity=app.state.identity,
+        # FR-LC-03's first step, which has been an empty slot since the leaver
+        # sequence was written. A deployment with no directory still runs the
+        # step and records that it had nothing to do.
+        targets=(
+            (LdapTarget(client=app.state.directory, writer=app.state.directory_writer),)
+            if app.state.directory is not None
+            else ()
+        ),
     )
     app.state.scim_users = UserStore(
         session_factory,
@@ -150,16 +174,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         on_transition=app.state.lifecycle_orchestrator.transitioned,
     )
     app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
-
-    # The directory, when one is configured. Absent is a state an operator
-    # chose, so it is not an error — but a *misconfigured* one is, which is why
-    # the profile name is validated at startup rather than at first search.
-    app.state.directory = _directory(settings, redis)
-    if app.state.directory is not None:
-        # Reported rather than fatal. FR-DIR-08 asks that a directory outage
-        # degrade to cached group data, and a readiness probe that failed on it
-        # would take the broker out of rotation for something it can survive.
-        app.state.readiness_probes["directory"] = app.state.directory.healthy
 
     # What ends a grace period is somebody looking. The deadline is durable
     # because it is a column; this is the process that reads it.
@@ -206,6 +220,23 @@ def _directory(settings: Settings, redis: Any) -> DirectoryClient | None:
         start_tls=settings.ldap_start_tls,
         allow_plaintext=settings.ldap_allow_plaintext,
         cache=redis,
+    )
+
+
+def _directory_writer(settings: Settings, client: DirectoryClient | None) -> DirectoryWriter | None:
+    """The write half, built only when there is a directory to write to."""
+    if client is None:
+        return None
+    return DirectoryWriter(
+        profile=directory_profile(settings.ldap_profile),
+        base_dn=settings.ldap_base_dn,
+        connector=Connector(
+            url=settings.ldap_url,
+            bind_dn=settings.ldap_bind_dn,
+            bind_password=settings.ldap_bind_password,
+            start_tls=settings.ldap_start_tls,
+            allow_plaintext=settings.ldap_allow_plaintext,
+        ),
     )
 
 

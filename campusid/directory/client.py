@@ -30,9 +30,12 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Final
 
+from campusid.directory.connection import Connector, DirectoryUnavailable
 from campusid.directory.groups import Expansion, expand
 from campusid.directory.profiles import DirectoryProfile
 from campusid.logging import get_logger
+
+__all__ = ["CACHE_PREFIX", "PAGE_SIZE", "DirectoryClient", "DirectoryUnavailable", "DirectoryUser"]
 
 log = get_logger(__name__)
 
@@ -45,24 +48,6 @@ CACHE_TTL: Final = timedelta(minutes=15)
 that a revoked membership stops granting access within a coffee break."""
 
 CACHE_PREFIX: Final = "directory:groups:"
-
-CONNECT_TIMEOUT: Final = 5
-"""Seconds. A directory that is slow is, for a login, a directory that is down —
-and a login that hangs for the TCP default is worse than one that degrades.
-
-A whole number rather than a float: ldap3 packs the receive timeout into a
-`SO_RCVTIMEO` socket option, which refuses anything else with a message about
-an integer argument that names neither the option nor the value.
-"""
-
-
-class DirectoryUnavailable(Exception):
-    """The directory could not be reached or would not answer.
-
-    Distinct from "the person is not there": one is our problem and the other is
-    an answer. Conflating them is how an outage becomes a silent mass
-    deprovisioning.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,16 +95,17 @@ class DirectoryClient:
         connector: Any = None,
     ) -> None:
         self._profile = profile
-        self._url = url
         self._base_dn = base_dn
-        self._bind_dn = bind_dn
-        self._bind_password = bind_password
-        self._start_tls = start_tls
-        self._allow_plaintext = allow_plaintext
         self._cache = cache
         # Injected so the client is testable without a server. The default is
-        # the real one; a test supplies ldap3's mock or a fake.
-        self._connector = connector or self._connect
+        # the real one; a test supplies a fake.
+        self._connector = connector or Connector(
+            url=url,
+            bind_dn=bind_dn,
+            bind_password=bind_password,
+            start_tls=start_tls,
+            allow_plaintext=allow_plaintext,
+        )
 
     # --- reading ----------------------------------------------------------
 
@@ -282,44 +268,6 @@ class DirectoryClient:
 
         found = [entry for entry in entries if entry.get("type") == "searchResEntry"]
         return found[:limit] if limit else found
-
-    def _connect(self) -> Any:
-        """Open and bind one connection.
-
-        A connection per search rather than a pool. `ldap3`'s pooling is bound to
-        its own threading model and this client is already crossing a thread
-        boundary; two mechanisms sharing responsibility for connection lifetime
-        is how a connection ends up used from two threads at once. The cost is a
-        handshake per login, which is what the group cache absorbs.
-        """
-        import ssl
-
-        from ldap3 import ALL, Connection, Server, Tls
-
-        secure = self._url.startswith("ldaps://")
-        if not secure and not self._start_tls and not self._allow_plaintext:
-            raise DirectoryUnavailable(
-                "refusing a plaintext bind; set ldap_start_tls or ldap_allow_plaintext"
-            )
-
-        tls = Tls(validate=ssl.CERT_REQUIRED) if secure or self._start_tls else None
-        server = Server(self._url, get_info=ALL, tls=tls, connect_timeout=CONNECT_TIMEOUT)
-        connection = Connection(
-            server,
-            user=self._bind_dn or None,
-            password=self._bind_password or None,
-            auto_bind=False,
-            raise_exceptions=True,
-            receive_timeout=CONNECT_TIMEOUT,
-        )
-        connection.open()
-        if not secure and self._start_tls:
-            # Before the bind, always. StartTLS afterwards would have sent the
-            # password in the clear and then encrypted the rest of a session
-            # whose credential was already gone.
-            connection.start_tls()
-        connection.bind()
-        return connection
 
     def _to_user(self, entry: dict[str, Any]) -> DirectoryUser:
         """Convert one entry into our vocabulary at the boundary.

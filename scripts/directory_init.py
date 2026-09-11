@@ -52,6 +52,87 @@ def log(message: str) -> None:
     print(f"directory-init: {message}", flush=True)
 
 
+def _config_connection() -> Any:
+    """A connection to `cn=config`, with client-side schema checking off.
+
+    `get_info=NONE` rather than `ALL` on purpose. ldap3 otherwise caches the
+    schema at bind time and validates object classes against it — and the schema
+    it reads is the *data* subschema, which does not describe `cn=config` at all.
+    Loading a module also adds object classes that a connection bound before it
+    has no way to know about. The server validates either way, and it is the
+    authority.
+    """
+    from ldap3 import NONE
+
+    server = Server(LDAP_URL, get_info=NONE, connect_timeout=10)
+    return Connection(
+        server, user=CONFIG_DN, password=CONFIG_PASSWORD, auto_bind=True, raise_exceptions=True
+    )
+
+
+def enable_password_policy() -> None:
+    """Load the ppolicy overlay, which is what makes an account lockable.
+
+    `pwdAccountLockedTime` is not part of `ppolicy.schema` — that file defines
+    the *policy* object class and its `pwdMaxAge`-style attributes. The
+    operational attributes a lock actually uses come from the overlay module,
+    so a directory with the schema and without the overlay rejects a lock with
+    `invalid attribute type`, which reads as a typo rather than as a missing
+    feature.
+
+    A campus OpenLDAP that locks accounts has this overlay. The fixture has it
+    for the same reason it has the eduPerson schema: a development directory
+    unlike the one the code is written for proves nothing.
+    """
+    from ldap3 import MODIFY_ADD
+    from ldap3.core.exceptions import LDAPAttributeOrValueExistsResult
+
+    connection = _config_connection()
+    try:
+        try:
+            connection.modify(
+                "cn=module{0},cn=config", {"olcModuleLoad": [(MODIFY_ADD, ["ppolicy.la"])]}
+            )
+            log("loaded the ppolicy module")
+        except LDAPAttributeOrValueExistsResult:
+            log("ppolicy module already loaded")
+
+        database = _database_dn(connection)
+        if database is None:
+            log("no database found for the suffix; skipping the ppolicy overlay")
+            return
+
+        try:
+            connection.add(
+                f"olcOverlay=ppolicy,{database}",
+                ["olcOverlayConfig", "olcPPolicyConfig"],
+                {"olcOverlay": "ppolicy"},
+            )
+            log("enabled the ppolicy overlay")
+        except LDAPEntryAlreadyExistsResult:
+            log("ppolicy overlay present")
+    finally:
+        connection.unbind()
+
+
+def _database_dn(connection: Any) -> str | None:
+    """Which `cn=config` database serves our suffix.
+
+    Discovered rather than hardcoded as `olcDatabase={1}mdb`. The index depends
+    on how many databases the image defines, and an overlay attached to the
+    wrong one is configured, reported as configured, and does nothing.
+    """
+    connection.search(
+        search_base="cn=config",
+        search_filter=f"(olcSuffix={BASE_DN})",
+        attributes=["olcSuffix"],
+    )
+    if not connection.response:
+        return None
+    dn: str = connection.response[0]["dn"]
+    return dn
+
+
 def add_schema() -> None:
     """Load the eduPerson attributes into `cn=config` (FR-DIR-03).
 
@@ -62,17 +143,29 @@ def add_schema() -> None:
     empty result. A fixture without it would be proving the client works against
     a server unlike the one it is written for.
     """
-    server = Server(LDAP_URL, get_info=ALL, connect_timeout=10)
-    connection = Connection(
-        server, user=CONFIG_DN, password=CONFIG_PASSWORD, auto_bind=True, raise_exceptions=True
-    )
+    connection = _config_connection()
     try:
+        # Checked rather than attempted-and-forgiven. Re-adding a schema entry
+        # fails with a *generic* error naming a duplicate attribute type, not
+        # with `entryAlreadyExists`: the server parses the definitions before it
+        # looks at the DN. Catching that by message would be a string match on
+        # somebody else's wording.
+        if _schema_present(connection):
+            log("eduPerson schema present")
+            return
         connection.add(SCHEMA_DN, ["olcSchemaConfig"], schema_entry())
         log("added the eduPerson schema")
-    except LDAPEntryAlreadyExistsResult:
-        log("eduPerson schema present")
     finally:
         connection.unbind()
+
+
+def _schema_present(connection: Any) -> bool:
+    connection.search(
+        search_base="cn=schema,cn=config",
+        search_filter="(cn=*eduperson)",
+        attributes=["cn"],
+    )
+    return bool(connection.response)
 
 
 def person(
@@ -130,6 +223,7 @@ def main() -> int:
         return 1
 
     add_schema()
+    enable_password_policy()
 
     server = Server(LDAP_URL, get_info=ALL, connect_timeout=10)
     connection = Connection(

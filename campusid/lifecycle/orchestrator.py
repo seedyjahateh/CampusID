@@ -62,14 +62,15 @@ EVENT_FOR = {
 class ProvisioningTarget(Protocol):
     """A downstream system a person's account exists in.
 
-    Named as a protocol now, with no implementations, because the *order* it
-    occupies in a deprovisioning is a requirement and deciding it later would
-    mean re-deciding it. LDAP and the campus portal arrive in M4.
+    Addressed by login rather than by `person_uuid`, because no downstream
+    system has heard of ours. Resolving the two is this module's job: it is the
+    half of the problem that needs the identity registry, and a target that had
+    to reach for one would be a target coupled to our storage.
     """
 
     name: str
 
-    async def disable(self, person_uuid: str) -> None: ...
+    async def disable(self, login: str) -> None: ...
 
 
 class LifecycleOrchestrator:
@@ -84,6 +85,7 @@ class LifecycleOrchestrator:
         grants: Any,
         audit: Any,
         targets: Sequence[ProvisioningTarget] = (),
+        identity: Any = None,
     ) -> None:
         self._rules = rules
         self._lifecycle = lifecycle
@@ -91,6 +93,7 @@ class LifecycleOrchestrator:
         self._grants = grants
         self._audit = audit
         self._targets = tuple(targets)
+        self._identity = identity
 
     # --- joiner and mover -------------------------------------------------
 
@@ -203,18 +206,59 @@ class LifecycleOrchestrator:
         return current
 
     async def _disable_accounts(self, person_uuid: str) -> list[str]:
-        """Step one, which currently has nothing to do.
+        """Step one: the account in every downstream system.
 
-        Recorded anyway. An empty step and a missing step read very differently
-        a year later, and the difference is exactly the question "did we ever
-        disable the directory account?".
+        Recorded even when there are no targets. An empty step and a missing
+        step read very differently a year later, and the difference is exactly
+        the question "did we ever disable the directory account?".
+
+        A failure here is not swallowed. The retry and dead-letter machinery
+        exists for an unreachable downstream, and a step that absorbed the error
+        would leave an enabled account behind with a trail saying it was
+        disabled — which is worse than a visible failure by the whole width of
+        the audit trail.
         """
+        if not self._targets:
+            await self._step(person_uuid, DISABLE_ACCOUNTS, {"targets": []})
+            return []
+
+        login = await self._login_for(person_uuid)
+        if login is None:
+            # Nothing downstream can be addressed without one, and inventing a
+            # login to try would be guessing at somebody else's namespace.
+            log.warning("lifecycle.no_login_for_targets", person_uuid=person_uuid)
+            await self._step(person_uuid, DISABLE_ACCOUNTS, {"targets": [], "reason": "no login"})
+            return []
+
         disabled: list[str] = []
         for target in self._targets:
-            await target.disable(person_uuid)
+            await target.disable(login)
             disabled.append(target.name)
         await self._step(person_uuid, DISABLE_ACCOUNTS, {"targets": disabled})
         return disabled
+
+    async def _login_for(self, person_uuid: str) -> str | None:
+        """The principal name a downstream system knows this person by.
+
+        The live ePPN when there is one, and the tombstoned one when there is
+        not — which is the ordinary case for a leaver, because provisioning
+        releases a person's identifiers before this runs. Using a released value
+        is safe here and nowhere else: FR-LC-08 guarantees an ePPN is never
+        reassigned, so the tombstone still names exactly one person. Without the
+        fallback, a SCIM delete would leave the directory account enabled and
+        the trail would say the step ran with nothing to do.
+        """
+        if self._identity is None:
+            return None
+
+        identifiers = await self._identity.identifiers(person_uuid, include_released=True)
+        eppns = [identifier for identifier in identifiers if identifier.id_type == "eppn"]
+        live = [identifier for identifier in eppns if identifier.released_at is None]
+        for candidate in (live, eppns):
+            if candidate:
+                value: str = candidate[0].value
+                return value
+        return None
 
     async def _step(self, person_uuid: str, step: str, detail: dict[str, Any]) -> None:
         await self._audit.record(
