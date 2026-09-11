@@ -13,6 +13,7 @@ cause the thing being audited.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -22,6 +23,7 @@ from fakeredis import aioredis
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from campusid.audit.events import EventType
 from campusid.audit.models import AuditEventRecord
 from campusid.audit.query import Page, Query
 from campusid.authz.engine import AAL1, AAL2
@@ -317,6 +319,68 @@ async def test_the_trail_is_not_cacheable(http: AsyncClient, wired: FastAPI) -> 
     response = await http.get("/admin/audit", cookies=await _session(wired))
 
     assert response.headers["cache-control"] == "no-store"
+
+
+# --- the export (FR-AUD-08) -------------------------------------------------
+
+
+async def test_exporting_needs_a_session(http: AsyncClient) -> None:
+    assert (await http.get("/admin/audit/export")).status_code == 401
+
+
+async def test_an_auditor_may_export(
+    http: AsyncClient, wired: FastAPI, assignments: _Assignments
+) -> None:
+    assignments.roles = {AUDITOR_ROLE}
+
+    response = await http.get("/admin/audit/export", cookies=await _session(wired))
+
+    assert response.status_code == 200
+
+
+async def test_the_export_is_newline_delimited_json(http: AsyncClient, wired: FastAPI) -> None:
+    """Not `application/json`, which would promise a single document and deliver
+    a sequence of them."""
+    response = await http.get("/admin/audit/export", cookies=await _session(wired))
+
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    assert json.loads(response.text.splitlines()[0])["event_id"] == "event-1"
+
+
+async def test_the_export_is_named_after_its_window(http: AsyncClient, wired: FastAPI) -> None:
+    response = await http.get(
+        "/admin/audit/export",
+        params={"since": "2026-09-03", "until": "2026-09-04"},
+        cookies=await _session(wired),
+    )
+
+    disposition = response.headers["content-disposition"]
+    assert "2026-09-03-to-2026-09-04.ndjson" in disposition
+    assert disposition.startswith("attachment;")
+
+
+async def test_an_export_is_itself_audited(http: AsyncClient, wired: FastAPI) -> None:
+    """ "Who took a copy of the audit trail, and of what" is a question the audit
+    trail should be able to answer about itself."""
+    await http.get(
+        "/admin/audit/export", params={"subject": SUBJECT}, cookies=await _session(wired)
+    )
+
+    recorded = wired.state.audit.of_type(EventType.AUDIT_EXPORTED)
+    assert len(recorded) == 1
+    assert recorded[0].actor == PERSON
+    assert recorded[0].detail["subject"] == SUBJECT
+
+
+async def test_a_malformed_export_window_is_a_bad_request(
+    http: AsyncClient, wired: FastAPI, queries: _Queries
+) -> None:
+    response = await http.get(
+        "/admin/audit/export", params={"since": "whenever"}, cookies=await _session(wired)
+    )
+
+    assert response.status_code == 400
+    assert queries.asked == []
 
 
 async def test_a_timeline_names_its_subject(

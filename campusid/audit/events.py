@@ -120,6 +120,16 @@ class EventType(StrEnum):
     finishes is the shape of somebody scanning a QR code into the wrong app, and
     it is invisible if only the finished ones are recorded."""
 
+    AUDIT_EXPORTED = "audit.exported"
+    """A bulk read of the trail by a named person (FR-AUD-08). Recorded as a
+    first-class event rather than left to an access log, because "who took a copy
+    of the audit trail, and of what" is a question the audit trail should be able
+    to answer about itself."""
+
+    AUDIT_PRUNED = "audit.pruned"
+    """A retention pass. Written by the pass itself, so the surviving trail
+    carries its own explanation for where it begins."""
+
     # --- administration -----------------------------------------------------
     ADMIN_ACTION = "admin.action"
     CONFIG_CHANGE = "config.change"

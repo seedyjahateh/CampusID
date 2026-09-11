@@ -97,3 +97,47 @@ class AuditEventRecord(Base):
         # row could be hidden.
         Index("uq_audit_event_seq", "seq", unique=True),
     )
+
+
+class AuditRetentionAnchor(Base):
+    """What a retention pass removed, so the chain still verifies (FR-AUD-08).
+
+    Deleting old events breaks the hash chain by construction: the oldest
+    surviving row links to a predecessor that is no longer there, and a verifier
+    cannot tell that apart from somebody having removed it to hide something.
+
+    This is the difference. A pass records where it cut and what the last removed
+    event hashed to, and the verifier starts from that value instead of from the
+    genesis constant. Tampering is still caught, because forging an anchor means
+    writing a row — and this table is append-only to the application for the same
+    reason `audit_event` is.
+
+    A row here is therefore a claim that needs to be as trustworthy as the trail.
+    It carries who ran the pass and why, and the count, so "the trail starts in
+    March because we prune at 400 days" and "the trail starts in March because
+    somebody deleted February" are different-looking facts.
+    """
+
+    __tablename__ = "audit_retention_anchor"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    removed_through_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    """The sequence of the last event the pass deleted."""
+
+    removed_through_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    """What that event hashed to — the value the surviving chain links back to."""
+
+    removed_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    """The `occurred_at` boundary the pass used, so the policy that produced this
+    cut is visible rather than inferred from the sequence."""
+
+    performed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    performed_by: Mapped[str] = mapped_column(String(256), nullable=False)
+    reason: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    __table_args__ = (Index("ix_audit_retention_anchor_seq", "removed_through_seq"),)

@@ -57,6 +57,7 @@ def test_declared_tables_match_the_migrations() -> None:
         "role_assignment",
         "mfa_factor",
         "mfa_recovery_code",
+        "audit_retention_anchor",
     }
 
 

@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from campusid.audit.chain import GENESIS, Broken, link, verify_from
 from campusid.audit.events import AuditEvent, EventType, Outcome, redact
-from campusid.audit.models import AuditEventRecord
+from campusid.audit.models import AuditEventRecord, AuditRetentionAnchor
 from campusid.logging import get_logger
 from campusid.saml.stores import utcnow
 
@@ -219,8 +219,14 @@ class AuditLog:
 
         The batches are stitched by carrying the expected hash across, so the
         boundary between two batches is checked exactly like any other link.
+
+        Starts from the last retention anchor rather than from the genesis
+        constant when the trail has been pruned (FR-AUD-08). A verifier that
+        assumed genesis after a prune would report the whole surviving trail as
+        broken; one that skipped the first link entirely would let a deletion
+        pass unnoticed. The anchor is what makes the third option possible.
         """
-        expected = GENESIS
+        expected = await self._starting_hash()
         last_seq = 0
 
         while True:
@@ -246,6 +252,22 @@ class AuditLog:
             expected = str(events[-1]["hash"])
             last_seq = int(events[-1]["seq"])
 
+    async def _starting_hash(self) -> str:
+        """Where the surviving chain legitimately begins.
+
+        The genesis constant when nothing has been pruned, the newest retention
+        anchor's hash when something has. Read here rather than taken as an
+        argument so a caller cannot verify against the wrong origin by accident,
+        and so the verification command needs to know nothing about retention.
+        """
+        async with self._sessions() as session:
+            anchor = await session.scalar(
+                select(AuditRetentionAnchor.removed_through_hash)
+                .order_by(AuditRetentionAnchor.removed_through_seq.desc())
+                .limit(1)
+            )
+        return str(anchor) if anchor else GENESIS
+
     async def chain_head(self) -> str:
         """The hash the trail currently ends on.
 
@@ -257,7 +279,11 @@ class AuditLog:
             tail = await session.scalar(
                 select(AuditEventRecord.hash).order_by(AuditEventRecord.seq.desc()).limit(1)
             )
-        return str(tail or GENESIS)
+        # Falls back to the anchor rather than to genesis, so a trail pruned down
+        # to nothing still reports the value its last event hashed to — otherwise
+        # a published head would appear to reset, which is what a trail somebody
+        # had emptied would also look like.
+        return str(tail) if tail else await self._starting_hash()
 
     async def _write(self, event: AuditEvent) -> None:
         try:
@@ -274,10 +300,23 @@ class AuditLog:
                 # special case for the verifier to be fooled at.
                 await session.execute(select(func.pg_advisory_xact_lock(CHAIN_LOCK)))
 
-                previous = await session.scalar(
+                tail = await session.scalar(
                     select(AuditEventRecord.hash).order_by(AuditEventRecord.seq.desc()).limit(1)
                 )
-                previous = previous or GENESIS
+                if tail is None:
+                    # An empty table is not necessarily a new one: a retention
+                    # pass can remove every surviving event. Linking to the
+                    # genesis constant then would start a second chain the
+                    # verifier — which resumes from the anchor — reads as a break
+                    # at the very first row after the prune.
+                    anchor = await session.scalar(
+                        select(AuditRetentionAnchor.removed_through_hash)
+                        .order_by(AuditRetentionAnchor.removed_through_seq.desc())
+                        .limit(1)
+                    )
+                    previous = str(anchor) if anchor else GENESIS
+                else:
+                    previous = str(tail)
 
                 row = _row(event)
                 session.add(

@@ -130,6 +130,19 @@ class Settings(BaseSettings):
     `base_url` may not describe.
     """
 
+    audit_retention_days: int = 400
+    """How long the audit trail is kept (FR-AUD-08).
+
+    Four hundred days rather than a year, so the trail always covers the same
+    month last year — which is what somebody comparing an annual access review
+    against the previous one actually needs.
+
+    Read by the pruning command, not by the broker: the application role cannot
+    delete from the trail, so retention is a deliberate operation with a reason
+    recorded against somebody's name rather than something that happens while
+    requests are being served.
+    """
+
     app_database_url: str = ""
     """Where the *application* connects, if that differs from where migrations do.
 

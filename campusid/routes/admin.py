@@ -37,9 +37,10 @@ from typing import Any, Final
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from campusid.audit.events import EventType, Outcome
+from campusid.audit.export import CONTENT_TYPE, filename, ndjson
 from campusid.audit.query import DEFAULT_LIMIT, Query, as_json
 from campusid.authz.engine import AAL1
 from campusid.config import Environment
@@ -392,6 +393,57 @@ async def subject_timeline(subject: str, request: Request) -> JSONResponse:
     return JSONResponse(
         {"subject": subject, "events": [as_json(event) for event in events]},
         headers=NO_STORE,
+    )
+
+
+@router.get("/audit/export")
+async def export_audit(request: Request) -> Response:
+    """Stream matching events as newline-delimited JSON (FR-AUD-08).
+
+    The format every SIEM ingests without being told anything: one event per
+    line, no enclosing array, and a file that can be split and resumed at a line
+    boundary. Streamed rather than assembled, because a year of a real trail does
+    not fit in memory at either end of the wire.
+
+    Every line carries its hash and the one before it, so a SIEM holding the
+    export can verify the chain without asking the broker anything — which is
+    most of the point of exporting an audit trail.
+    """
+    try:
+        caller = await _admin(request, roles=READERS)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    try:
+        query = _query_from(request)
+    except ValueError as exc:
+        return _refuse({"error": "invalid_request", "detail": str(exc)}, 400)
+
+    # An export is a bulk read of the trail by a named person. Recorded as a
+    # first-class event rather than left to the web server's access log, because
+    # "who took a copy of the audit trail, and of what" is a question the audit
+    # trail should be able to answer about itself.
+    await request.app.state.audit.record(
+        EventType.AUDIT_EXPORTED,
+        Outcome.SUCCESS,
+        actor=caller.person_uuid,
+        session_id=caller.sid,
+        detail={
+            "since": query.since.isoformat() if query.since else None,
+            "until": query.until.isoformat() if query.until else None,
+            "subject": query.subject,
+        },
+    )
+
+    return StreamingResponse(
+        ndjson(request.app.state.audit_query, query),
+        media_type=CONTENT_TYPE,
+        headers={
+            **NO_STORE,
+            # Named so the wrong window does not get ingested from somebody's
+            # downloads folder.
+            "Content-Disposition": f'attachment; filename="{filename(query)}"',
+        },
     )
 
 
