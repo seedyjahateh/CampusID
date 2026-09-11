@@ -27,14 +27,77 @@ import secrets
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from campusid.audit.chain import GENESIS, Broken, link, verify_from
 from campusid.audit.events import AuditEvent, EventType, Outcome, redact
 from campusid.audit.models import AuditEventRecord
 from campusid.logging import get_logger
 from campusid.saml.stores import utcnow
 
 log = get_logger(__name__)
+
+CHAIN_LOCK = 0x43414944
+"""The advisory-lock key the chain writer holds, as a constant.
+
+A fixed number rather than a hash of a string, so it is greppable and cannot
+collide with the migration lock by accident — two locks that happen to agree
+would deadlock a migration against a login.
+"""
+
+
+def _verifiable(record: AuditEventRecord) -> dict[str, Any]:
+    """A stored row in the shape the verifier hashes.
+
+    The chain's own columns are carried alongside the covered fields rather than
+    inside them: `verify` reads `seq`, `prev_hash` and `hash` to check the links
+    and ignores them when recomputing the digest, which is what makes a row that
+    was edited *and* rehashed still detectable at the link before it.
+    """
+    return {
+        "seq": record.seq,
+        "prev_hash": record.prev_hash,
+        "hash": record.hash,
+        "event_id": record.event_id,
+        "event_type": record.event_type,
+        "outcome": record.outcome,
+        "occurred_at": record.occurred_at,
+        "correlation_id": record.correlation_id,
+        "actor": record.actor,
+        "subject": record.subject,
+        "target": record.target,
+        "reason": record.reason,
+        "source_ip": record.source_ip,
+        "user_agent": record.user_agent,
+        "session_id": record.session_id,
+        "detail": record.detail,
+    }
+
+
+def _row(event: AuditEvent) -> dict[str, object]:
+    """The event as columns, in one place.
+
+    Shared with the hash so the bytes that are stored and the bytes that are
+    hashed cannot drift: a field added to the insert and forgotten in the digest
+    is a field an attacker may edit freely.
+    """
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type.value,
+        "outcome": event.outcome.value,
+        "occurred_at": event.timestamp,
+        "correlation_id": event.correlation_id,
+        "actor": event.actor,
+        "subject": event.subject,
+        "target": event.target,
+        "reason": event.reason,
+        "source_ip": event.source_ip,
+        "user_agent": event.user_agent,
+        "session_id": event.session_id,
+        "detail": event.detail,
+    }
+
 
 _correlation_id: contextvars.ContextVar[str] = contextvars.ContextVar("correlation_id")
 
@@ -147,24 +210,81 @@ class AuditLog:
         await self._write(event)
         return event
 
+    async def verify_chain(self, *, batch: int = 5000) -> Broken | None:
+        """Walk the whole trail and report the first break (FR-AUD-05).
+
+        Read in batches rather than all at once, because a year of a real
+        deployment's events does not fit in memory and a verifier that only works
+        on a small trail is one nobody runs on a large one.
+
+        The batches are stitched by carrying the expected hash across, so the
+        boundary between two batches is checked exactly like any other link.
+        """
+        expected = GENESIS
+        last_seq = 0
+
+        while True:
+            async with self._sessions() as session:
+                rows = list(
+                    await session.execute(
+                        select(AuditEventRecord)
+                        .where(AuditEventRecord.seq > last_seq)
+                        .order_by(AuditEventRecord.seq)
+                        .limit(batch)
+                    )
+                )
+            if not rows:
+                return None
+
+            events = [_verifiable(row[0]) for row in rows]
+            # The carried hash is spliced onto the front as a sentinel the
+            # verifier can start from, so `verify` needs no notion of resuming.
+            broken = verify_from(expected, events)
+            if broken is not None:
+                return broken
+
+            expected = str(events[-1]["hash"])
+            last_seq = int(events[-1]["seq"])
+
+    async def chain_head(self) -> str:
+        """The hash the trail currently ends on.
+
+        Worth publishing somewhere the database's owner does not control. That is
+        what turns "partial tampering is detectable" into "tampering is
+        detectable", and it is the one part of this that cannot live in code.
+        """
+        async with self._sessions() as session:
+            tail = await session.scalar(
+                select(AuditEventRecord.hash).order_by(AuditEventRecord.seq.desc()).limit(1)
+            )
+        return str(tail or GENESIS)
+
     async def _write(self, event: AuditEvent) -> None:
         try:
             async with self._sessions() as session, session.begin():
+                # One writer at a time, for the life of this transaction. The
+                # chain is a linked list built from its own tail, so two writers
+                # reading the same tail would produce two events claiming the
+                # same predecessor — a fork, which a verifier reports as tampering
+                # because from the outside it is indistinguishable from one.
+                #
+                # This serialises audit writes. That caps audit throughput at a
+                # few thousand a second, which is far above what this broker
+                # emits, and buys a chain with no unsealed tail and therefore no
+                # special case for the verifier to be fooled at.
+                await session.execute(select(func.pg_advisory_xact_lock(CHAIN_LOCK)))
+
+                previous = await session.scalar(
+                    select(AuditEventRecord.hash).order_by(AuditEventRecord.seq.desc()).limit(1)
+                )
+                previous = previous or GENESIS
+
+                row = _row(event)
                 session.add(
                     AuditEventRecord(
-                        event_id=event.event_id,
-                        event_type=event.event_type.value,
-                        outcome=event.outcome.value,
-                        occurred_at=event.timestamp,
-                        correlation_id=event.correlation_id,
-                        actor=event.actor,
-                        subject=event.subject,
-                        target=event.target,
-                        reason=event.reason,
-                        source_ip=event.source_ip,
-                        user_agent=event.user_agent,
-                        session_id=event.session_id,
-                        detail=event.detail,
+                        **row,
+                        prev_hash=previous,
+                        hash=link(previous, row),
                     )
                 )
         except Exception as exc:

@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Index, String, func
+from sqlalchemy import BigInteger, DateTime, Identity, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,7 +51,11 @@ class AuditEventRecord(Base):
     actor: Mapped[str | None] = mapped_column(String(512))
     subject: Mapped[str | None] = mapped_column(String(512))
     target: Mapped[str | None] = mapped_column(String(1024))
-    reason: Mapped[str | None] = mapped_column(String(64))
+    reason: Mapped[str | None] = mapped_column(String(512))
+    """Why, in the actor's own words, for an action somebody chose to take
+    (FR-ADM-07). Long enough to hold a sentence: a justification truncated to a
+    fragment is one nobody can act on, and a write that failed because it was too
+    long would lose the event entirely, since audit writes never raise."""
     source_ip: Mapped[str | None] = mapped_column(String(45))
     """45 characters: an IPv6 address with an embedded IPv4 suffix is the
     longest textual form."""
@@ -59,6 +63,23 @@ class AuditEventRecord(Base):
     user_agent: Mapped[str | None] = mapped_column(String(512))
     session_id: Mapped[str | None] = mapped_column(String(128))
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=False), nullable=False)
+    """The chain's ordering (FR-AUD-05).
+
+    A sequence rather than a timestamp, because two events can share a
+    microsecond and a chain needs a total order. Allocated while the writer holds
+    the chain lock, so allocation order and link order are the same thing.
+    """
+
+    prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    """`SHA256(prev_hash || canonical_json(event))`.
+
+    Stored rather than recomputed on read, which is the point: a verifier
+    compares what was written against what the content now hashes to, and a value
+    derived on read would agree with a tampered row by construction.
+    """
 
     __table_args__ = (
         # The subject-centric timeline (FR-AUD-03, US-02): "every attribute
@@ -70,4 +91,9 @@ class AuditEventRecord(Base):
         Index("ix_audit_event_type_outcome_time", "event_type", "outcome", "occurred_at"),
         # FR-AUD-02: pull the whole chain for one login.
         Index("ix_audit_event_correlation", "correlation_id"),
+        # The chain is walked in sequence order, and the writer reads the tail on
+        # every insert. Unique because two events sharing a position would make
+        # the order the verifier walks ambiguous — which is precisely where a
+        # row could be hidden.
+        Index("uq_audit_event_seq", "seq", unique=True),
     )
