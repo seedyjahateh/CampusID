@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from campusid import __version__, health
 from campusid.audit.log import AuditLog
+from campusid.audit.query import AuditQueryStore
 from campusid.authz.cache import CachingDecider, DecisionCache
 from campusid.authz.loader import PolicyEngineStore
 from campusid.authz.roles import RoleStore
@@ -166,6 +167,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
+    app.state.audit_query = AuditQueryStore(session_factory)
 
     # The directory, when one is configured. Absent is a state an operator
     # chose, so it is not an error — but a *misconfigured* one is, which is why

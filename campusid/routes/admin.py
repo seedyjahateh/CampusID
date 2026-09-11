@@ -31,6 +31,7 @@ defaulted, because a default reason is a field everybody stops reading.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import httpx
@@ -39,6 +40,7 @@ from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from campusid.audit.events import EventType, Outcome
+from campusid.audit.query import DEFAULT_LIMIT, Query, as_json
 from campusid.authz.engine import AAL1
 from campusid.config import Environment
 from campusid.errors import MetadataRejected, ReasonCode
@@ -52,6 +54,16 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 ADMIN_ROLE: Final = "iam-admin"
+AUDITOR_ROLE: Final = "auditor"
+
+READERS: Final = frozenset({ADMIN_ROLE, AUDITOR_ROLE})
+"""Who may read the audit trail.
+
+Reading it and changing the federation are different privileges. An auditor
+should be able to answer "what happened" without also being able to disable an
+identity provider — and requiring the administrator role to read the trail would
+mean every audit request carried the rights to cause the thing being audited.
+"""
 
 NO_STORE: Final = {"Cache-Control": "no-store"}
 
@@ -108,15 +120,22 @@ class Refused(Exception):
         self.status = status
 
 
-async def _admin(request: Request) -> Caller:
-    """The three conditions, in the order that decides what the caller is told."""
+async def _admin(request: Request, *, roles: frozenset[str] = frozenset({ADMIN_ROLE})) -> Caller:
+    """The three conditions, in the order that decides what the caller is told.
+
+    `roles` names who may pass. It is a set rather than a single name because
+    reading the trail and changing the federation are different privileges: an
+    auditor should be able to answer "what happened" without also being able to
+    disable an identity provider, and collapsing the two would make every audit
+    request require the rights to cause the thing being audited.
+    """
     sid = request.cookies.get(SESSION_COOKIE)
     session = await request.app.state.sessions.load(sid) if sid else None
     if session is None or session.person_uuid is None:
         raise Refused(UNAUTHENTICATED, 401)
 
-    roles = await request.app.state.role_assignments.roles_for(session.person_uuid)
-    if ADMIN_ROLE not in roles:
+    held = await request.app.state.role_assignments.roles_for(session.person_uuid)
+    if not roles & set(held):
         # 404 rather than 403. A 403 confirms the console exists and that this
         # account is merely not on the list.
         raise Refused(NOT_FOUND, 404)
@@ -314,6 +333,114 @@ async def set_enabled(entity_id: str, request: Request) -> JSONResponse:
         detail={"entity_id": entity_id, "enabled": enabled},
     )
     return JSONResponse({"entity_id": entity_id, "enabled": enabled}, headers=NO_STORE)
+
+
+# --- the audit trail (FR-AUD-03) --------------------------------------------
+
+
+@router.get("/audit")
+async def search_audit(request: Request) -> JSONResponse:
+    """Query the trail by subject, actor, relying party, type, outcome or window.
+
+    Open to auditors as well as administrators: reading what happened and being
+    able to change what happens are different privileges, and requiring the
+    second to do the first would put the rights to cause an incident in the hands
+    of everybody investigating one.
+    """
+    try:
+        await _admin(request, roles=READERS)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    try:
+        query = _query_from(request)
+    except ValueError as exc:
+        return _refuse({"error": "invalid_request", "detail": str(exc)}, 400)
+
+    page = await request.app.state.audit_query.search(query)
+    return JSONResponse(
+        {
+            "events": [as_json(event) for event in page.events],
+            # Null when this is the last page, rather than absent: a caller
+            # looping until the key disappears and a caller looping until it is
+            # null should both terminate.
+            "next_cursor": page.next_cursor,
+        },
+        headers=NO_STORE,
+    )
+
+
+@router.get("/audit/subject/{subject:path}")
+async def subject_timeline(subject: str, request: Request) -> JSONResponse:
+    """One person's history, oldest first (US-02, FR-ADM-05).
+
+    The most recent page, reversed for reading. A timeline that started at the
+    beginning of a busy account's history would open on a first login from three
+    years ago and show nothing since.
+    """
+    try:
+        await _admin(request, roles=READERS)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    try:
+        limit = _int(request.query_params.get("limit"), default=DEFAULT_LIMIT)
+    except ValueError as exc:
+        return _refuse({"error": "invalid_request", "detail": str(exc)}, 400)
+
+    events = await request.app.state.audit_query.timeline(subject, limit=limit)
+    return JSONResponse(
+        {"subject": subject, "events": [as_json(event) for event in events]},
+        headers=NO_STORE,
+    )
+
+
+def _query_from(request: Request) -> Query:
+    """Build a query from the URL, refusing anything that is not one.
+
+    Parsed rather than passed through: a malformed timestamp that reached the
+    database would come back as a 500 that says the broker is broken, and an
+    unbounded `limit` would turn one request into a full table read.
+    """
+    params = request.query_params
+    return Query(
+        subject=params.get("subject") or None,
+        actor=params.get("actor") or None,
+        target=params.get("target") or None,
+        event_type=params.get("event_type") or None,
+        outcome=params.get("outcome") or None,
+        correlation_id=params.get("correlation_id") or None,
+        since=_moment(params.get("since")),
+        until=_moment(params.get("until")),
+        limit=_int(params.get("limit"), default=DEFAULT_LIMIT),
+        before_seq=_int(params.get("cursor"), default=None),
+    )
+
+
+def _moment(value: str | None) -> datetime | None:
+    """An ISO-8601 timestamp, read as UTC when it carries no offset.
+
+    Assumed rather than rejected, because an operator typing a date into a URL
+    means the day, not the day in whatever timezone the server happens to run
+    in — and a naive value compared against `timestamptz` is an error Postgres
+    raises rather than an answer anybody wanted.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{value!r} is not an ISO-8601 timestamp") from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _int(value: str | None, *, default: int | None) -> Any:
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{value!r} is not a number") from exc
 
 
 # --- impersonation (FR-ADM-03) ----------------------------------------------
