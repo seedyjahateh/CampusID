@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     one federated application.
     """
 
+    roles_file: str = "/app/config/roles.yaml"
+    """Role definitions, their derivations, and the pairs that may not be held
+    together (FR-AZ-01, FR-AZ-07)."""
+
     scope: str = "campus.test"
     """This deployment's own scope — the domain the campus IdP is authoritative
     for. Values scoped to anything else are dropped during normalisation, and

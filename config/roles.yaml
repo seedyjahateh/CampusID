@@ -1,0 +1,92 @@
+# Roles, how they are derived, and which of them may not be held together.
+# (FR-AZ-01, FR-AZ-07)
+#
+# A role is a name for a job somebody does. Entitlements say what they may
+# reach; a role says why. The difference matters at review time: "this person
+# has lms:access" invites the question "should they?", while "this person is a
+# course administrator" answers it.
+#
+# Most roles are *derived*, not assigned. Being a student makes you a student,
+# and somebody re-typing that fact into a role table is somebody who will one day
+# forget to un-type it. Derivation is stated here so an assignment has an origin
+# and losing the origin loses the role — which is the same rule entitlements
+# follow, for the same reason.
+#
+# A role held from two origins survives losing one of them. Somebody who is a
+# course administrator because they teach *and* because an administrator granted
+# it directly keeps the role when they stop teaching, and an implementation that
+# stored one row per person and role would silently take it away.
+
+roles:
+  - id: student
+    display_name: Student
+    description: Enrolled on a programme of study
+
+  - id: instructor
+    display_name: Instructor
+    description: Teaches at least one course
+
+  - id: employee
+    display_name: Employee
+    description: Holds a contract of employment
+
+  - id: course-admin
+    display_name: Course administrator
+    description: Administers course content and enrolment in the learning environment
+
+  - id: iam-admin
+    display_name: Identity administrator
+    description: Administers the broker itself
+    requires_aal2: true
+
+  - id: auditor
+    display_name: Auditor
+    description: Reads the audit trail and cannot change anything
+    requires_aal2: true
+
+  - id: finance-approver
+    display_name: Finance approver
+    description: Approves expenditure
+
+  - id: finance-requester
+    display_name: Finance requester
+    description: Raises expenditure requests
+
+# What derives a role automatically. `affiliation` fires on an eduPerson
+# affiliation; `group` fires on membership of a directory group, matched on the
+# group's common name rather than its full distinguished name so a tree
+# reorganisation does not silently revoke everybody's roles.
+derivations:
+  - role: student
+    affiliation: student
+
+  - role: instructor
+    affiliation: faculty
+
+  - role: employee
+    affiliation: staff
+
+  - role: employee
+    affiliation: faculty
+
+  - role: course-admin
+    group: lms-course-admins
+
+  - role: iam-admin
+    group: iam-administrators
+
+  - role: auditor
+    group: audit-readers
+
+# Roles that may not be held at the same time (FR-AZ-07).
+#
+# The classic pair is raising a payment and approving it: one person who can do
+# both can pay themselves, and no amount of logging turns that back into a
+# control. Refused at assignment time with an error naming the conflict, because
+# the person doing the assigning is the one who can undo it.
+separation_of_duties:
+  - roles: [finance-requester, finance-approver]
+    reason: One person must not both raise and approve expenditure
+
+  - roles: [iam-admin, auditor]
+    reason: An administrator must not audit their own changes

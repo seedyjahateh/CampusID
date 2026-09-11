@@ -23,6 +23,7 @@ x-broker-env: &broker-env
   CAMPUSID_POLICY_DIR: /app/policies
   CAMPUSID_LIFECYCLE_RULES_FILE: /app/config/lifecycle_rules.yaml
   CAMPUSID_AUTHORIZATION_POLICY_FILE: /app/config/authorization.yaml
+  CAMPUSID_ROLES_FILE: /app/config/roles.yaml
   # Empty unless the directory profile is up: a broker configured with a
   # directory it cannot reach degrades on every login, and one configured with
   # none simply has no directory.

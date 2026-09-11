@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # `metadata`, which is what autogenerate and the schema test compare against. A
 # table whose module is not imported here is invisible to both.
 import campusid.audit.models
+import campusid.authz.models
 import campusid.federation.models
 import campusid.identity.models
 import campusid.lifecycle.models

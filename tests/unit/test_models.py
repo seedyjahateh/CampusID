@@ -54,6 +54,7 @@ def test_declared_tables_match_the_migrations() -> None:
         "entitlement_grant",
         "lifecycle_event",
         "provisioning_dead_letter",
+        "role_assignment",
     }
 
 

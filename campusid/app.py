@@ -14,6 +14,8 @@ from fastapi import FastAPI
 from campusid import __version__, health
 from campusid.audit.log import AuditLog
 from campusid.authz.loader import PolicyEngineStore
+from campusid.authz.roles import RoleStore
+from campusid.authz.store import RoleAssignmentStore
 from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
@@ -137,6 +139,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
     app.state.lifecycle_rules = RulesStore(Path(settings.lifecycle_rules_file))
     app.state.authorization = PolicyEngineStore(Path(settings.authorization_policy_file))
+    app.state.roles = RoleStore(Path(settings.roles_file))
+    app.state.role_assignments = RoleAssignmentStore(session_factory, catalogue=app.state.roles)
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
