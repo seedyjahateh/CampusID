@@ -16,6 +16,14 @@ x-broker-env: &broker-env
   CAMPUSID_BASE_URL: ${CAMPUSID_BASE_URL:-http://localhost:8000}
   CAMPUSID_DATABASE_URL: >-
     postgresql+asyncpg://${POSTGRES_USER:-campusid}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-campusid}
+  # Where the application connects: a role with no DDL rights and only SELECT
+  # and INSERT on `audit_event` (FR-AUD-04), so an UPDATE against the trail is
+  # refused by Postgres rather than by there being no code that writes one.
+  # Migrations keep using CAMPUSID_DATABASE_URL, because they must own the schema
+  # and the application must not.
+  CAMPUSID_APP_DATABASE_URL: >-
+    postgresql+asyncpg://campusid_app:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-campusid}
+  CAMPUSID_APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
   CAMPUSID_REDIS_URL: redis://redis:6379/0
   CAMPUSID_LOG_LEVEL: ${CAMPUSID_LOG_LEVEL:-INFO}
   CAMPUSID_LOG_FORMAT: ${CAMPUSID_LOG_FORMAT:-json}

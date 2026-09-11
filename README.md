@@ -97,6 +97,27 @@ TOTP, WebAuthn and recovery codes carry no such caveat: those are real
 implementations of RFC 6238, the WebAuthn assertion ceremony, and Argon2id-hashed
 single-use codes respectively.
 
+### The audit trail
+
+Every audit event carries the hash of the one before it, so the trail is a chain
+rather than a pile. Verify it, and print the head:
+
+```sh
+docker compose exec broker python scripts/verify_audit_chain.py
+```
+
+The chain makes *partial* tampering impossible to hide: an edited field, a
+deleted row, an inserted event. It does not stop somebody who can rewrite the
+whole table from the tamper point forward — publishing the head hash somewhere
+they do not control is what closes that, and it is an operational practice rather
+than code.
+
+The broker connects as `campusid_app`, a role with no DDL rights and only SELECT
+and INSERT on `audit_event`. An UPDATE against the trail from the application's
+connection is refused by Postgres, not merely absent from the code. Migrations
+connect as the schema owner, because they have to own it and the application must
+not.
+
 ### Administration
 
 The admin API lives under `/admin` and is protected by the broker it

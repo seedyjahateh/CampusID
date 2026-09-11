@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import delete, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from campusid.audit.chain import ALTERED, GENESIS, UNLINKED
@@ -28,13 +29,28 @@ from campusid.audit.events import EventType, Outcome
 from campusid.audit.log import AuditLog, set_correlation_id
 from campusid.audit.models import AuditEventRecord
 from campusid.config import get_settings
-from campusid.db import create_engine, create_session_factory
+from campusid.db import create_engine, create_owner_engine, create_session_factory
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
+    """The *owner* engine, because these tests clear the trail.
+
+    The application's role cannot delete from `audit_event` — that is the whole
+    point of FR-AUD-04 and it is asserted below. A test that needs to start from
+    an empty table therefore has to connect as the role that owns the schema,
+    which is exactly the separation being tested.
+    """
+    engine = create_owner_engine(get_settings())
+    yield engine
+    await engine.dispose()
+
+
+@pytest.fixture
+async def app_engine() -> AsyncIterator[AsyncEngine]:
+    """How the broker itself connects."""
     engine = create_engine(get_settings())
     yield engine
     await engine.dispose()
@@ -232,6 +248,109 @@ async def test_the_emitter_exposes_no_way_to_change_a_row(audit: AuditLog) -> No
     surface = {name for name in dir(audit) if not name.startswith("_")}
 
     assert not {"update", "delete", "amend", "remove"} & surface
+
+
+# --- append-only, enforced by the database ----------------------------------
+
+
+def _requires_the_restricted_role() -> None:
+    if not get_settings().app_database_url:
+        pytest.skip("no separate application role is configured")
+
+
+async def _refused(engine: AsyncEngine, statement: str) -> str:
+    """Run a statement expecting Postgres to refuse it, and return why.
+
+    The reason is returned rather than only the exception type, because
+    "permission denied" and "syntax error" are both `ProgrammingError` and only
+    one of them means the grant is doing its job.
+    """
+    with pytest.raises(DBAPIError) as raised:
+        async with engine.begin() as connection:
+            await connection.execute(text(statement))
+    return str(raised.value)
+
+
+async def test_the_application_role_cannot_update_the_trail(
+    app_engine: AsyncEngine, audit: AuditLog
+) -> None:
+    """FR-AUD-04's acceptance test. Until the grant existed, the append-only
+    promise rested entirely on there being no code that writes an UPDATE — real
+    protection against the ordinary bug and none at all against a compromised
+    process, which is the case an audit trail exists for."""
+    _requires_the_restricted_role()
+    await _emit(audit, 1)
+
+    assert "permission denied" in await _refused(
+        app_engine, "UPDATE audit_event SET subject = 'tampered'"
+    )
+
+
+async def test_the_application_role_cannot_delete_from_the_trail(
+    app_engine: AsyncEngine, audit: AuditLog
+) -> None:
+    _requires_the_restricted_role()
+    await _emit(audit, 1)
+
+    assert "permission denied" in await _refused(app_engine, "DELETE FROM audit_event")
+
+
+async def test_the_application_role_cannot_truncate_the_trail(
+    app_engine: AsyncEngine,
+) -> None:
+    """The one that empties the table without touching a row, and the one a
+    grant of UPDATE and DELETE alone would leave open."""
+    _requires_the_restricted_role()
+
+    assert "permission denied" in await _refused(app_engine, "TRUNCATE audit_event")
+
+
+async def test_the_application_role_cannot_alter_the_trail(
+    app_engine: AsyncEngine,
+) -> None:
+    """An append-only grant the grantee can ALTER away is decoration."""
+    _requires_the_restricted_role()
+
+    assert "must be owner" in await _refused(app_engine, "ALTER TABLE audit_event DROP COLUMN hash")
+
+
+async def test_the_application_role_cannot_create_a_table(
+    app_engine: AsyncEngine,
+) -> None:
+    """No DDL rights at all. A role that can create a table can create one that
+    shadows nothing useful today and something useful tomorrow."""
+    _requires_the_restricted_role()
+
+    assert "permission denied" in await _refused(app_engine, "CREATE TABLE scratch (n int)")
+
+
+async def test_the_application_role_can_still_read_and_write(
+    app_engine: AsyncEngine, audit: AuditLog
+) -> None:
+    """The grant has to leave the broker able to do its job, or the trail stops
+    being written and the protection is total in the wrong direction."""
+    _requires_the_restricted_role()
+    await _emit(audit, 2)
+
+    async with app_engine.connect() as connection:
+        count = await connection.scalar(text("SELECT count(*) FROM audit_event"))
+
+    assert count == 2
+
+
+async def test_the_application_role_can_still_write_to_other_tables(
+    app_engine: AsyncEngine,
+) -> None:
+    """Only the audit trail is append-only. A role that could not update a
+    session or a factor would be a broker that cannot run."""
+    _requires_the_restricted_role()
+
+    async with app_engine.begin() as connection:
+        # Touches no rows, so it asserts the privilege rather than changing
+        # anything another test depends on.
+        await connection.execute(
+            text("UPDATE person SET updated_at = updated_at WHERE person_uuid IS NULL")
+        )
 
 
 async def test_a_replayed_event_id_cannot_duplicate_an_event(

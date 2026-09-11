@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from campusid.audit.events import REDACTED, EventType
 from campusid.audit.models import AuditEventRecord
 from campusid.config import get_settings
-from campusid.db import create_engine, create_session_factory
+from campusid.db import create_owner_engine, create_session_factory
 from campusid.session.cookies import REQUEST_BINDING_COOKIE
 
 pytestmark = [pytest.mark.integration, pytest.mark.federation]
@@ -54,7 +54,13 @@ def _internal(url: str) -> str:
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
-    engine = create_engine(get_settings())
+    """The owner engine, because the teardown clears what this test wrote.
+
+    The application's own role cannot delete from `audit_event` (FR-AUD-04), so
+    a fixture that tidies up has to be the role that owns the schema — which is
+    the separation working rather than getting in the way.
+    """
+    engine = create_owner_engine(get_settings())
     yield engine
     await engine.dispose()
 

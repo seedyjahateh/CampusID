@@ -130,6 +130,28 @@ class Settings(BaseSettings):
     `base_url` may not describe.
     """
 
+    app_database_url: str = ""
+    """Where the *application* connects, if that differs from where migrations do.
+
+    Empty means one connection for both, which is how a development stack starts
+    and how this project ran until the audit trail needed protecting. Set, it
+    points at a role with no DDL rights and only SELECT and INSERT on
+    `audit_event` (FR-AUD-04), so an UPDATE against the trail is refused by
+    Postgres rather than by there being no code that writes one.
+
+    Two settings rather than one, because migrations must own the schema and the
+    application must not. A single URL cannot be both.
+    """
+
+    app_db_password: str = ""
+    """The password migration 0015 gives the application role.
+
+    Read by the migration rather than baked into it, so the value never appears
+    in a file under version control. Empty leaves the role unable to log in,
+    which still carries the grants — the privilege model exists whether or not a
+    deployment has been pointed at it.
+    """
+
     impersonation_fixtures: str = ""
     """The ePPNs an administrator may act as for testing, comma-separated
     (FR-ADM-03).
