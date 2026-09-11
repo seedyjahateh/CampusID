@@ -35,6 +35,7 @@ from campusid.lifecycle.store import LifecycleStore
 from campusid.lifecycle.sweeper import GraceSweeper
 from campusid.lifecycle.targets import LdapTarget
 from campusid.logging import configure_logging, get_logger
+from campusid.mfa.store import FactorStore
 from campusid.middleware import (
     BodySizeLimitMiddleware,
     CorrelationMiddleware,
@@ -48,6 +49,7 @@ from campusid.oidc.registry import ClientRegistry
 from campusid.policy.loader import PolicyStore
 from campusid.routes import disco as disco_routes
 from campusid.routes import logout as logout_routes
+from campusid.routes import mfa as mfa_routes
 from campusid.routes import oauth2 as oauth2_routes
 from campusid.routes import oidc as oidc_routes
 from campusid.routes import saml as saml_routes
@@ -144,6 +146,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.role_assignments = RoleAssignmentStore(session_factory, catalogue=app.state.roles)
     app.state.decision_cache = DecisionCache(redis)
     app.state.decider = CachingDecider(app.state.authorization, app.state.decision_cache)
+    app.state.mfa = FactorStore(session_factory, issuer=settings.service_name)
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
@@ -315,5 +318,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(oauth2_routes.router)
     app.include_router(logout_routes.router)
     app.include_router(scim_routes.router)
+    app.include_router(mfa_routes.router)
 
     return app

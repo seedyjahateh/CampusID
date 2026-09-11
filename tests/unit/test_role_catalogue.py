@@ -245,6 +245,65 @@ def test_a_file_with_no_roles_is_refused(tmp_path: Path) -> None:
         load_roles(_write(tmp_path, "roles: []\n"))
 
 
+def test_a_role_without_a_display_name_is_refused(tmp_path: Path) -> None:
+    """The display name is what an access review reads. A catalogue of bare ids
+    makes the review a list of strings nobody can adjudicate."""
+    with pytest.raises(RoleError, match="display_name"):
+        load_roles(_write(tmp_path, "roles:\n  - id: nameless\n"))
+
+
+def test_a_role_without_an_id_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(RoleError, match="needs an id"):
+        load_roles(_write(tmp_path, "roles:\n  - display_name: Anonymous\n"))
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("roles: not-a-list\n", "non-empty"),
+        ("roles:\n  - just-a-string\n", "must be a mapping"),
+        (MINIMAL + "derivations: not-a-list\n", "must be a list"),
+        (MINIMAL + "derivations:\n  - just-a-string\n", "must be a mapping"),
+        (MINIMAL + "separation_of_duties: not-a-list\n", "must be a list"),
+        (MINIMAL + "separation_of_duties:\n  - just-a-string\n", "must be a mapping"),
+    ],
+)
+def test_a_section_of_the_wrong_shape_is_refused(tmp_path: Path, body: str, match: str) -> None:
+    """The role file is a trust boundary like every other policy file here, and
+    a shape check that happens at load time is one that happens while somebody
+    is looking at the file."""
+    with pytest.raises(RoleError, match=match):
+        load_roles(_write(tmp_path, body))
+
+
+def test_a_file_that_is_not_a_mapping_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(RoleError, match="mapping"):
+        load_roles(_write(tmp_path, "- just\n- a\n- list\n"))
+
+
+def test_a_derivation_with_an_empty_value_is_refused(tmp_path: Path) -> None:
+    """An affiliation of "" matches nobody, so the role it was meant to grant
+    never arrives and nothing says so."""
+    body = MINIMAL + "derivations:\n  - role: only-role\n    affiliation: ''\n"
+
+    with pytest.raises(RoleError, match="non-empty string"):
+        load_roles(_write(tmp_path, body))
+
+
+def test_a_conflict_naming_one_role_is_refused(tmp_path: Path) -> None:
+    """A pair needs two halves. One role conflicting with itself is a control
+    that can never fire."""
+    body = MINIMAL + "separation_of_duties:\n  - roles: [only-role]\n    reason: nonsense\n"
+
+    with pytest.raises(RoleError, match="at least two"):
+        load_roles(_write(tmp_path, body))
+
+
+def test_a_missing_file_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(RoleError):
+        load_roles(tmp_path / "nothing-here.yaml")
+
+
 def test_yaml_that_would_construct_objects_is_not_executed(tmp_path: Path) -> None:
     path = _write(tmp_path, "roles: !!python/object/apply:os.system ['echo pwned']\n")
 

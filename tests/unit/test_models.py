@@ -55,6 +55,7 @@ def test_declared_tables_match_the_migrations() -> None:
         "lifecycle_event",
         "provisioning_dead_letter",
         "role_assignment",
+        "mfa_factor",
     }
 
 

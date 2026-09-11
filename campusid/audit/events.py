@@ -104,6 +104,15 @@ class EventType(StrEnum):
     incomplete deprovisioning shows which step it got to rather than simply
     being absent."""
 
+    # --- second factors -----------------------------------------------------
+    MFA_ENROLMENT_STARTED = "mfa.enrolment_started"
+    MFA_ENROLLED = "mfa.enrolled"
+    MFA_ENROLMENT_FAILED = "mfa.enrolment_failed"
+    MFA_FACTOR_REMOVED = "mfa.factor_removed"
+    """Four events for two outcomes, because a started enrolment that never
+    finishes is the shape of somebody scanning a QR code into the wrong app, and
+    it is invisible if only the finished ones are recorded."""
+
     # --- administration -----------------------------------------------------
     ADMIN_ACTION = "admin.action"
     CONFIG_CHANGE = "config.change"
