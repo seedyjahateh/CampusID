@@ -56,10 +56,12 @@ class GraceSweeper:
         *,
         interval: timedelta = DEFAULT_INTERVAL,
         startup_delay: timedelta = STARTUP_DELAY,
+        decisions: Any = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._interval = interval
         self._startup_delay = startup_delay
+        self._decisions = decisions
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -84,10 +86,21 @@ class GraceSweeper:
     async def sweep_once(self) -> int:
         """One pass. Separate from the loop so an operator can run it by hand
         and so the loop has nothing in it but timing."""
-        expired = await self._lifecycle.expire_due()
-        if expired:
-            log.info("lifecycle.grace.swept", expired=expired)
-        return int(expired)
+        people = list(await self._lifecycle.expire_due())
+        # An expiry is an entitlement change like any other, so the decisions
+        # cached about the people it touched have to stop being reachable —
+        # otherwise the grace period ends a minute after the sweep says it did.
+        for person in people:
+            await self._invalidate(person)
+        if people:
+            log.info("lifecycle.grace.swept", expired=len(people))
+        return len(people)
+
+    async def _invalidate(self, person_uuid: str) -> None:
+        """Optional, so a test of the timing has no reason to need a Redis."""
+        if self._decisions is None:
+            return
+        await self._decisions.invalidate(person_uuid)
 
     async def _run(self) -> None:
         await asyncio.sleep(self._startup_delay.total_seconds())

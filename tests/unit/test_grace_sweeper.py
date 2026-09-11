@@ -19,17 +19,29 @@ NOTHING = timedelta(0)
 BRIEF = timedelta(seconds=0.01)
 
 
+def _people(count: int) -> list[str]:
+    return [f"00000000-0000-0000-0000-{n:012d}" for n in range(count)]
+
+
 class _Lifecycle:
     def __init__(self, results: list[int | Exception]) -> None:
         self._results = list(results)
         self.calls = 0
 
-    async def expire_due(self) -> int:
+    async def expire_due(self) -> list[str]:
         self.calls += 1
         outcome = self._results.pop(0) if self._results else 0
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        return _people(outcome)
+
+
+class _Decisions:
+    def __init__(self) -> None:
+        self.invalidated: list[str] = []
+
+    async def invalidate(self, person_uuid: str) -> None:
+        self.invalidated.append(person_uuid)
 
 
 async def _run_briefly(sweeper: GraceSweeper, seconds: float = 0.05) -> None:
@@ -62,6 +74,24 @@ async def test_a_sweep_revokes_what_is_due() -> None:
     sweeper = GraceSweeper(lifecycle)
 
     assert await sweeper.sweep_once() == 3
+
+
+async def test_an_expiry_unmakes_the_decisions_cached_about_the_person() -> None:
+    """FR-AZ-08's other half, from the scheduler's side. An entitlement that
+    ended at the sweep but stays permitted for another minute is a grace period
+    that outlives its own deadline."""
+    decisions = _Decisions()
+    sweeper = GraceSweeper(_Lifecycle([2]), decisions=decisions)
+
+    await sweeper.sweep_once()
+
+    assert decisions.invalidated == _people(2)
+
+
+async def test_a_sweep_with_no_cache_still_revokes() -> None:
+    """The cache is a shortcut in front of the decision, so a deployment without
+    one is a slower broker rather than a broken sweep."""
+    assert await GraceSweeper(_Lifecycle([1])).sweep_once() == 1
 
 
 async def test_the_loop_keeps_sweeping() -> None:

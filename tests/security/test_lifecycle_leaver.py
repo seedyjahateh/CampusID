@@ -121,6 +121,18 @@ class _Identity:
         return [row for row in self._identifiers if row.released_at is None]
 
 
+class _Decisions:
+    """The authorization decision cache, reduced to the one call that matters."""
+
+    def __init__(self, trace: _Trace) -> None:
+        self._trace = trace
+        self.invalidated: list[str] = []
+
+    async def invalidate(self, person_uuid: str) -> None:
+        self._trace.steps.append("decisions")
+        self.invalidated.append(person_uuid)
+
+
 class _Broken(_Target):
     """A target that never works, however many times it is asked."""
 
@@ -164,6 +176,7 @@ def _orchestrator(
     dead_letters: Any = None,
     transient: Any = Exception,
     sleep: Any = None,
+    decisions: Any = None,
 ) -> LifecycleOrchestrator:
     return LifecycleOrchestrator(
         rules=_Rules(rules),
@@ -176,6 +189,7 @@ def _orchestrator(
         dead_letters=dead_letters,
         transient=transient,
         retry_sleep=sleep,
+        decisions=decisions,
     )
 
 
@@ -197,6 +211,64 @@ async def test_the_steps_happen_in_the_order_the_requirement_gives(
         "tokens:sid-1",
         "entitlements",
     ]
+
+
+# --- the cached answer ------------------------------------------------------
+
+
+async def test_deprovisioning_unmakes_the_decisions_cached_about_them(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """FR-AZ-08. Revoking somebody's entitlements while a permit about them is
+    still readable from the cache means the deprovisioning does not reach the
+    thing enforcing access until the caching window closes — which is the one
+    delay a leaver process exists to avoid."""
+    decisions = _Decisions(trace)
+    orchestrator = _orchestrator(trace, rules, audit, decisions=decisions)
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert decisions.invalidated == [PERSON]
+
+
+async def test_the_cache_is_told_after_the_entitlements_change(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """Order matters in the one direction. Telling the cache first would leave a
+    window in which a request re-evaluates against entitlements the person still
+    holds, and caches that permit for another minute."""
+    decisions = _Decisions(trace)
+    orchestrator = _orchestrator(trace, rules, audit, decisions=decisions)
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert trace.steps.index("decisions") > trace.steps.index("entitlements")
+
+
+async def test_a_mover_unmakes_them_too(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """Somebody who stops being staff and starts being an alum keeps a session
+    and loses entitlements, so the stale permit is the only thing left to catch
+    them with."""
+    decisions = _Decisions(trace)
+    orchestrator = _orchestrator(trace, rules, audit, decisions=decisions)
+
+    await orchestrator.transitioned(PERSON, {"student"}, {"alum"}, on=TODAY)
+
+    assert decisions.invalidated == [PERSON]
+
+
+async def test_a_lifecycle_without_a_cache_still_deprovisions(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """The cache is a shortcut in front of the decision. A deployment without
+    one is a slower broker, not a leaver process that refuses to run."""
+    orchestrator = _orchestrator(trace, rules, audit, sids=["sid-1"])
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert "entitlements" in trace.steps
 
 
 async def test_entitlements_are_revoked_last(

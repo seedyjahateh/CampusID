@@ -205,7 +205,7 @@ async def test_the_grace_period_ends_whether_or_not_anybody_was_watching(
     # A year later: nothing has been running, and the revocation is still due.
     expired = await store.expire_due(on=TODAY + timedelta(days=365))
 
-    assert expired >= 1
+    assert str(person) in expired
     assert LMS not in await store.held(person, on=TODAY + timedelta(days=365))
 
 
@@ -223,7 +223,7 @@ async def test_a_sweep_before_the_deadline_revokes_nothing(
         after={"alum"},
     )
 
-    assert await store.expire_due(on=TODAY + timedelta(days=1)) == 0
+    assert await store.expire_due(on=TODAY + timedelta(days=1)) == []
     assert LMS in await store.held(person, on=TODAY + timedelta(days=1))
 
 

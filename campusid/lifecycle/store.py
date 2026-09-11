@@ -148,15 +148,20 @@ class LifecycleStore:
                 )
             )
 
-    async def expire_due(self, *, on: date | None = None) -> int:
+    async def expire_due(self, *, on: date | None = None) -> list[str]:
         """Revoke every grant whose grace period has ended (FR-LC-05).
 
         The durable half. A broker that was not running when a grace period
         expired revokes on its next sweep rather than never — which is the whole
         reason the deadline is a column instead of a timer.
+
+        Returns the people affected rather than a count, because an expiry
+        changes what they are entitled to and something has to tell the decision
+        cache whose answers just went stale (FR-AZ-08). A count would leave the
+        sweep unable to say whose.
         """
         today = on or date.today()
-        expired = 0
+        expired: list[str] = []
 
         async with self._sessions() as session, session.begin():
             due = list(
@@ -180,11 +185,17 @@ class LifecycleStore:
                         correlation_id=correlation_id(),
                     )
                 )
-                expired += 1
+                expired.append(str(grant.person_uuid))
 
+        people = sorted(set(expired))
         if expired:
-            log.info("lifecycle.grace.expired", count=expired, on=today.isoformat())
-        return expired
+            log.info(
+                "lifecycle.grace.expired",
+                count=len(expired),
+                people=len(people),
+                on=today.isoformat(),
+            )
+        return people
 
     # --- helpers ----------------------------------------------------------
 

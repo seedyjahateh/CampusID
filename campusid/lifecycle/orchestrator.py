@@ -90,6 +90,7 @@ class LifecycleOrchestrator:
         dead_letters: Any = None,
         transient: type[Exception] | tuple[type[Exception], ...] = Exception,
         retry_sleep: Any = None,
+        decisions: Any = None,
     ) -> None:
         self._rules = rules
         self._lifecycle = lifecycle
@@ -107,6 +108,11 @@ class LifecycleOrchestrator:
         self._retry_sleep = retry_sleep
         """Injected so a test can exercise the retry path without waiting out
         thirty seconds of backoff to prove it."""
+
+        self._decisions = decisions
+        """The authorization decision cache, told when a transition changes what
+        somebody is entitled to (FR-AZ-08). Without it, a deprovisioning would
+        take up to a minute to reach whatever is enforcing access."""
 
     # --- joiner and mover -------------------------------------------------
 
@@ -134,6 +140,7 @@ class LifecycleOrchestrator:
         await self._lifecycle.apply(
             uuid.UUID(person_uuid), delta, before=before, after=after, source=source
         )
+        await self._invalidate_decisions(person_uuid)
         await self._record_delta(person_uuid, before, after, delta, source)
         return delta
 
@@ -188,6 +195,11 @@ class LifecycleOrchestrator:
             {"immediate": len(delta.immediate), "deferred": len(delta.deferred)},
         )
 
+        # 5. Every authorization decision cached about them. Steps 1-4 change
+        #    what the answer would be; this is what stops the old answer being
+        #    served for the rest of the caching window (FR-AZ-08).
+        await self._invalidate_decisions(person_uuid)
+
         await self._audit.record(
             EventType.LIFECYCLE_LEAVER,
             Outcome.SUCCESS,
@@ -212,6 +224,21 @@ class LifecycleOrchestrator:
         return delta
 
     # --- helpers ----------------------------------------------------------
+
+    async def _invalidate_decisions(self, person_uuid: str) -> None:
+        """Unmake every authorization decision cached about this person.
+
+        Entitlements are the input to those decisions, so a transition that does
+        not say so leaves a permit readable for the rest of the caching window —
+        which is the whole of the delay between deprovisioning somebody and the
+        thing enforcing access noticing.
+
+        Optional because most of the lifecycle tests have no Redis and should not
+        need one to assert what the lifecycle does.
+        """
+        if self._decisions is None:
+            return
+        await self._decisions.invalidate(person_uuid)
 
     def _current_rules(self) -> LifecycleRules:
         """The rules as of now, so an edit takes effect without a restart."""

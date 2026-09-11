@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from campusid import __version__, health
 from campusid.audit.log import AuditLog
+from campusid.authz.cache import CachingDecider, DecisionCache
 from campusid.authz.loader import PolicyEngineStore
 from campusid.authz.roles import RoleStore
 from campusid.authz.store import RoleAssignmentStore
@@ -141,6 +142,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.authorization = PolicyEngineStore(Path(settings.authorization_policy_file))
     app.state.roles = RoleStore(Path(settings.roles_file))
     app.state.role_assignments = RoleAssignmentStore(session_factory, catalogue=app.state.roles)
+    app.state.decision_cache = DecisionCache(redis)
+    app.state.decider = CachingDecider(app.state.authorization, app.state.decision_cache)
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
@@ -180,6 +183,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Only an unreachable directory is worth retrying. A write it refuses on
         # its merits will be refused identically five times.
         transient=DirectoryUnavailable,
+        # FR-AZ-08's other half. A transition changes what somebody is entitled
+        # to, so every decision cached about them has to stop being reachable —
+        # otherwise a deprovisioning takes up to a minute to reach the thing
+        # actually enforcing it.
+        decisions=app.state.decision_cache,
     )
     app.state.scim_users = UserStore(
         session_factory,
@@ -205,7 +213,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # What ends a grace period is somebody looking. The deadline is durable
     # because it is a column; this is the process that reads it.
-    sweeper = GraceSweeper(app.state.lifecycle)
+    sweeper = GraceSweeper(app.state.lifecycle, decisions=app.state.decision_cache)
     app.state.grace_sweeper = sweeper
     sweeper.start()
 
