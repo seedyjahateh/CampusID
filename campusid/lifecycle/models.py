@@ -104,6 +104,58 @@ class EntitlementGrant(Base):
     )
 
 
+class DeadLetter(Base):
+    """A downstream write that failed every attempt (FR-LC-09).
+
+    A row rather than a log line, because the alternative to giving up is
+    retrying forever and the alternative to a durable record is an account
+    nobody knows is still enabled. An item here is a security finding with a
+    replay button.
+    """
+
+    __tablename__ = "provisioning_dead_letter"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    person_uuid: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("person.person_uuid"), nullable=False
+    )
+
+    target: Mapped[str] = mapped_column(String(32), nullable=False)
+    """Which downstream system — `ldap`, `portal`. A replay has to know where to
+    send it, and a report has to be able to say "the directory is behind"."""
+
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    """`disable`, `create`, `modify`."""
+
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    """Everything needed to try again, including the login — because by the time
+    somebody replays this, the person's identifiers may have been released and
+    the registry would no longer volunteer one."""
+
+    attempts: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    """What went wrong, per attempt. "Refused four times then timed out" and
+    "timed out five times" are different incidents, and only the first suggests
+    the write itself is wrong."""
+
+    correlation_id: Mapped[str | None] = mapped_column(String(64))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    replayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """Set rather than deleted, so "this was stuck for three days" stays
+    answerable after somebody fixes it."""
+
+    __table_args__ = (
+        Index("ix_dead_letter_outstanding", "replayed_at"),
+        Index("ix_dead_letter_person", "person_uuid"),
+    )
+
+
 class LifecycleEvent(Base):
     """One thing that happened to a person (FR-LC-06)."""
 

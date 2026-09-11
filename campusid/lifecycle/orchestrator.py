@@ -32,6 +32,7 @@ from datetime import date
 from typing import Any, Protocol
 
 from campusid.audit.events import EventType, Outcome
+from campusid.lifecycle.retry import RetriesExhausted, with_retries
 from campusid.lifecycle.rules import Delta, LifecycleRules
 from campusid.lifecycle.store import LEAVER, LifecycleStore, event_type
 from campusid.logging import get_logger
@@ -86,6 +87,9 @@ class LifecycleOrchestrator:
         audit: Any,
         targets: Sequence[ProvisioningTarget] = (),
         identity: Any = None,
+        dead_letters: Any = None,
+        transient: type[Exception] | tuple[type[Exception], ...] = Exception,
+        retry_sleep: Any = None,
     ) -> None:
         self._rules = rules
         self._lifecycle = lifecycle
@@ -94,6 +98,15 @@ class LifecycleOrchestrator:
         self._audit = audit
         self._targets = tuple(targets)
         self._identity = identity
+        self._dead_letters = dead_letters
+        self._transient = transient
+        """What is worth retrying. Narrowed by the caller, because a directory
+        refusing a write it will refuse identically five times buys nothing but
+        five multiples of the backoff before the same dead letter."""
+
+        self._retry_sleep = retry_sleep
+        """Injected so a test can exercise the retry path without waiting out
+        thirty seconds of backoff to prove it."""
 
     # --- joiner and mover -------------------------------------------------
 
@@ -231,11 +244,66 @@ class LifecycleOrchestrator:
             return []
 
         disabled: list[str] = []
+        failed: list[str] = []
         for target in self._targets:
-            await target.disable(login)
-            disabled.append(target.name)
-        await self._step(person_uuid, DISABLE_ACCOUNTS, {"targets": disabled})
+            if await self._disable_one(target, person_uuid, login):
+                disabled.append(target.name)
+            else:
+                failed.append(target.name)
+
+        await self._step(
+            person_uuid,
+            DISABLE_ACCOUNTS,
+            {"targets": disabled, "dead_lettered": failed} if failed else {"targets": disabled},
+        )
         return disabled
+
+    async def _disable_one(self, target: ProvisioningTarget, person_uuid: str, login: str) -> bool:
+        """One target, retried and then dead-lettered (FR-LC-09).
+
+        A failure here does not stop the sequence, and that is the deliberate
+        part. The remaining steps — terminating sessions, revoking tokens,
+        ending entitlements — are ours to do and they still reduce what the
+        person can reach. Abandoning them because a directory was unreachable
+        would leave somebody with live sessions *and* an enabled account, which
+        is strictly worse than one of the two.
+
+        Without a queue to file it in, the failure propagates: dropping it would
+        leave an enabled account with a trail saying it was disabled, and that is
+        worse than a visible failure by the whole width of the audit trail.
+        """
+        try:
+            await with_retries(
+                lambda: target.disable(login),
+                retry_on=self._transient,
+                sleep=self._retry_sleep,
+                description=f"{target.name}.disable",
+            )
+            return True
+        except RetriesExhausted as exc:
+            if self._dead_letters is None:
+                raise
+            await self._dead_letters.record(
+                person_uuid=person_uuid,
+                target=target.name,
+                operation="disable",
+                # The login is carried because by the time somebody replays
+                # this, the person's identifiers may have been released and the
+                # registry would no longer volunteer one.
+                payload={"login": login},
+                attempts=exc.attempts,
+            )
+            await self._audit.record(
+                EventType.DEPROVISION_STEP,
+                Outcome.FAILURE,
+                subject=person_uuid,
+                detail={
+                    "step": DISABLE_ACCOUNTS,
+                    "target": target.name,
+                    "attempts": len(exc.attempts),
+                },
+            )
+            return False
 
     async def _login_for(self, person_uuid: str) -> str | None:
         """The principal name a downstream system knows this person by.

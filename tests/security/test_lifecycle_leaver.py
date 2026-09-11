@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from campusid.audit.events import EventType
+from campusid.audit.events import EventType, Outcome
 from campusid.lifecycle.orchestrator import (
     DEPROVISION_ORDER,
     DISABLE_ACCOUNTS,
@@ -27,6 +27,7 @@ from campusid.lifecycle.orchestrator import (
     TERMINATE_SESSIONS,
     LifecycleOrchestrator,
 )
+from campusid.lifecycle.retry import MAX_ATTEMPTS, RetriesExhausted
 from campusid.lifecycle.rules import LifecycleRules, load_rules
 from tests.support.audit import RecordingAuditLog
 
@@ -120,6 +121,28 @@ class _Identity:
         return [row for row in self._identifiers if row.released_at is None]
 
 
+class _Broken(_Target):
+    """A target that never works, however many times it is asked."""
+
+    async def disable(self, login: str) -> None:
+        raise ConnectionError("directory unreachable")
+
+
+class _Queue:
+    """The dead-letter queue, reduced to the one thing the orchestrator does."""
+
+    def __init__(self) -> None:
+        self.filed: list[dict[str, Any]] = []
+
+    async def record(self, **kwargs: Any) -> str:
+        self.filed.append(kwargs)
+        return "item-1"
+
+
+async def _nowait(seconds: float) -> None:
+    """Backoff, skipped. Thirty seconds of real sleeping proves arithmetic."""
+
+
 @pytest.fixture
 def trace() -> _Trace:
     return _Trace()
@@ -138,6 +161,9 @@ def _orchestrator(
     sids: list[str] | None = None,
     targets: tuple[Any, ...] = (),
     identity: _Identity | None = None,
+    dead_letters: Any = None,
+    transient: Any = Exception,
+    sleep: Any = None,
 ) -> LifecycleOrchestrator:
     return LifecycleOrchestrator(
         rules=_Rules(rules),
@@ -147,6 +173,9 @@ def _orchestrator(
         audit=audit,
         targets=targets,
         identity=identity if identity is not None else _Identity(),
+        dead_letters=dead_letters,
+        transient=transient,
+        retry_sleep=sleep,
     )
 
 
@@ -308,23 +337,116 @@ async def test_a_person_with_no_login_skips_the_targets(
     assert disable.detail["reason"] == "no login"
 
 
-async def test_a_failing_target_is_not_swallowed(
+async def test_a_failure_with_nowhere_to_file_it_is_not_swallowed(
     trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
 ) -> None:
-    """A step that absorbed the error would leave an enabled account behind with
-    a trail saying it was disabled, which is worse than a visible failure by the
-    whole width of the audit trail."""
+    """With no dead-letter queue configured, an exhausted retry propagates.
 
-    class _Broken(_Target):
-        async def disable(self, login: str) -> None:
-            raise RuntimeError("directory unreachable")
+    Dropping it would leave an enabled account behind with a trail saying it was
+    disabled, which is worse than a visible failure by the whole width of the
+    audit trail.
+    """
+    orchestrator = _orchestrator(
+        trace, rules, audit, targets=(_Broken(trace, "ldap"),), sleep=_nowait
+    )
 
-    orchestrator = _orchestrator(trace, rules, audit, targets=(_Broken(trace, "ldap"),))
-
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RetriesExhausted):
         await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
 
     assert "entitlements" not in trace.steps, "the run stopped at the failing step"
+
+
+async def test_an_exhausted_target_is_dead_lettered(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """FR-LC-09. The item carries the login, because by the time somebody
+    replays it the person's identifiers may have been released and the registry
+    would no longer volunteer one."""
+    queue = _Queue()
+    orchestrator = _orchestrator(
+        trace,
+        rules,
+        audit,
+        targets=(_Broken(trace, "ldap"),),
+        dead_letters=queue,
+        sleep=_nowait,
+    )
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert queue.filed[0]["target"] == "ldap"
+    assert queue.filed[0]["payload"] == {"login": LOGIN}
+    assert len(queue.filed[0]["attempts"]) == MAX_ATTEMPTS
+
+
+async def test_the_rest_of_the_sequence_still_runs(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """Deliberate. The remaining steps are ours to do and they still reduce what
+    the person can reach; abandoning them because a directory was unreachable
+    would leave somebody with live sessions *and* an enabled account, which is
+    strictly worse than one of the two."""
+    orchestrator = _orchestrator(
+        trace,
+        rules,
+        audit,
+        targets=(_Broken(trace, "ldap"),),
+        dead_letters=_Queue(),
+        sids=["sid-1"],
+        sleep=_nowait,
+    )
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert trace.steps[-1] == "entitlements"
+    assert f"sessions:{PERSON}" in trace.steps
+
+
+async def test_a_dead_lettered_target_is_audited_as_a_failure(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """The step is recorded, and recorded as having failed. A success with an
+    empty target list would read as a deployment with no directory."""
+    orchestrator = _orchestrator(
+        trace, rules, audit, targets=(_Broken(trace, "ldap"),), dead_letters=_Queue(), sleep=_nowait
+    )
+
+    await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    failures = [
+        event
+        for event in audit.events
+        if event.event_type is EventType.DEPROVISION_STEP and event.outcome is Outcome.FAILURE
+    ]
+    assert failures[0].detail["target"] == "ldap"
+    assert failures[0].detail["attempts"] == MAX_ATTEMPTS
+
+
+async def test_a_permanent_failure_is_not_retried(
+    trace: _Trace, rules: LifecycleRules, audit: RecordingAuditLog
+) -> None:
+    """Narrowing what counts as transient is the whole point: a write the far
+    end refuses on its merits will be refused identically five times."""
+    attempts: list[int] = []
+
+    class _Refused(_Target):
+        async def disable(self, login: str) -> None:
+            attempts.append(1)
+            raise ValueError("no such entry")
+
+    orchestrator = _orchestrator(
+        trace,
+        rules,
+        audit,
+        targets=(_Refused(trace, "ldap"),),
+        transient=ConnectionError,
+        sleep=_nowait,
+    )
+
+    with pytest.raises(ValueError):
+        await orchestrator.deprovision(PERSON, {"student"}, on=TODAY)
+
+    assert len(attempts) == 1
 
 
 async def test_a_leaver_event_summarises_the_run(

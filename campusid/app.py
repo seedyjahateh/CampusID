@@ -17,12 +17,13 @@ from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
 from campusid.directory.client import DirectoryClient
-from campusid.directory.connection import Connector
+from campusid.directory.connection import Connector, DirectoryUnavailable
 from campusid.directory.profiles import profile as directory_profile
 from campusid.directory.writes import DirectoryWriter
 from campusid.federation.registry import FederationRegistry
 from campusid.identity.registry import IdentityRegistry
 from campusid.keys import load_or_create
+from campusid.lifecycle.deadletter import DeadLetterQueue
 from campusid.lifecycle.orchestrator import LifecycleOrchestrator
 from campusid.lifecycle.rules import RulesStore
 from campusid.lifecycle.store import LifecycleStore
@@ -148,6 +149,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # would take the broker out of rotation for something it can survive.
         app.state.readiness_probes["directory"] = app.state.directory.healthy
 
+    app.state.dead_letters = DeadLetterQueue(session_factory)
+
     # Provisioning drives the lifecycle: a SCIM write is what makes somebody a
     # joiner, a mover or a leaver, and the store tells the orchestrator what
     # changed once the write has committed.
@@ -166,6 +169,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if app.state.directory is not None
             else ()
         ),
+        dead_letters=app.state.dead_letters,
+        # Only an unreachable directory is worth retrying. A write it refuses on
+        # its merits will be refused identically five times.
+        transient=DirectoryUnavailable,
     )
     app.state.scim_users = UserStore(
         session_factory,
