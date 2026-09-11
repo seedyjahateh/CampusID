@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from campusid import __version__, health
 from campusid.audit.log import AuditLog
+from campusid.authz.loader import PolicyEngineStore
 from campusid.cache import check_redis, create_redis
 from campusid.config import Settings, get_settings
 from campusid.db import check_database, create_engine, create_session_factory
@@ -135,6 +136,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.logout_notifier = LogoutNotifier(issuer=settings.oidc_issuer, client=logout_http)
     app.state.policies = PolicyStore(Path(settings.policy_dir), default_scope=settings.scope)
     app.state.lifecycle_rules = RulesStore(Path(settings.lifecycle_rules_file))
+    app.state.authorization = PolicyEngineStore(Path(settings.authorization_policy_file))
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)

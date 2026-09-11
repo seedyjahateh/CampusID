@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     institution and there is only one of it.
     """
 
+    authorization_policy_file: str = "/app/config/authorization.yaml"
+    """Where the ABAC rules live (FR-AZ-03).
+
+    One file, like the lifecycle rules and unlike the per-SP release policy: an
+    authorization rule is about the institution's resources rather than about
+    one federated application.
+    """
+
     scope: str = "campus.test"
     """This deployment's own scope — the domain the campus IdP is authoritative
     for. Values scoped to anything else are dropped during normalisation, and

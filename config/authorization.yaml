@@ -1,0 +1,126 @@
+# Authorization policy (FR-AZ-03, FR-AZ-04).
+#
+# Who may do what, to which resource, under which circumstances. Read by the
+# decision engine, which combines every matching rule with deny-overrides and
+# falls through to default deny.
+#
+# Two things follow from deny-overrides that are worth knowing before editing:
+#
+#   1. Order does not matter. A deny anywhere in this file beats every permit,
+#      so a rule added at the bottom is as strong as one added at the top. That
+#      is the point — with first-match-wins, where you paste a rule changes what
+#      it means, and the diff looks identical either way.
+#
+#   2. A permit is never enough on its own. Something has to match, and nothing
+#      may deny. Deleting a permit closes access; deleting a deny opens it, and
+#      the second is the edit to read twice.
+#
+# Assurance is not a matching condition. A rule asking for aal2 still matches a
+# single-factor session, and the engine turns the shortfall into a step-up
+# challenge rather than a denial (FR-AZ-05). Writing it as a condition would
+# send somebody to a help desk over something they can fix in ten seconds.
+
+rules:
+  # --- the floor ----------------------------------------------------------
+  # Restricted data is never released through this engine. First in the file
+  # for readability only; deny-overrides means it would win from anywhere.
+  - id: no-restricted-data
+    effect: deny
+    description: Restricted records are reached through the systems of record, not here
+    classifications: [restricted]
+
+  # A suspended or deactivated person holds no entitlements, so most rules stop
+  # matching for them on their own. This is the belt to that braces: an explicit
+  # deny for anybody carrying the affiliation we give to nobody.
+  - id: no-former-members
+    effect: deny
+    description: Somebody whose affiliation has ended reaches nothing
+    affiliations: [former-member]
+
+  # --- learning -----------------------------------------------------------
+  - id: lms-for-current-students
+    effect: permit
+    description: Students and teaching staff reach the learning environment
+    entitlements:
+      - urn:mace:campus.edu:entitlement:lms:access
+    resource_prefix: "lms:"
+    actions: [read, write]
+
+  - id: library-eresources
+    effect: permit
+    description: Licensed electronic resources, for current members only
+    entitlements:
+      - urn:mace:campus.edu:entitlement:library:eresources
+    resource_prefix: "library:"
+    actions: [read]
+
+  # --- employment ---------------------------------------------------------
+  # Somebody's own employment record. Requires a second factor because the
+  # record includes payslips and tax documents, and a shoulder-surfed password
+  # should not be enough to read a year of somebody's earnings.
+  - id: hr-self-service
+    effect: permit
+    description: An employee reads and updates their own HR record
+    entitlements:
+      - urn:mace:campus.edu:entitlement:hr:selfservice
+    resource_prefix: "hr:"
+    actions: [read, write]
+    assurance: urn:campusid:aal2
+
+  # --- infrastructure -----------------------------------------------------
+  - id: vpn-for-employees
+    effect: permit
+    description: Remote network access for staff and faculty
+    entitlements:
+      - urn:mace:campus.edu:entitlement:vpn:access
+    resources: [vpn:connect]
+    actions: [connect]
+    assurance: urn:campusid:aal2
+
+  # Administrative interfaces are reachable from the campus network only. Not
+  # because the network is trusted — it is not, which is why the assurance
+  # requirement stays — but because an administrative surface exposed to the
+  # whole internet is an attack surface with no upside.
+  - id: admin-from-campus-only
+    effect: deny
+    description: The admin surface is not reachable from outside the campus network
+    resource_prefix: "admin:"
+    networks: [public, vpn-untrusted]
+
+  - id: admin-for-iam-staff
+    effect: permit
+    description: IAM staff administer the broker
+    roles: [iam-admin]
+    resource_prefix: "admin:"
+    actions: [read, write]
+    assurance: urn:campusid:aal2
+
+  # --- research -----------------------------------------------------------
+  # Grant submission closes at a deadline, and the finance office asked that the
+  # system stop accepting them outside working hours rather than relying on
+  # everybody's clock. A time window is policy, not a feature of the app.
+  - id: grant-submission-in-hours
+    effect: permit
+    description: Research grant submission, during office hours
+    entitlements:
+      - urn:mace:campus.edu:entitlement:grants:submit
+    resource_prefix: "grants:"
+    actions: [read, write]
+    between: ["08:00", "18:00"]
+
+  - id: grant-reading-any-time
+    effect: permit
+    description: Reading a submitted grant is not time-bounded
+    entitlements:
+      - urn:mace:campus.edu:entitlement:grants:submit
+    resource_prefix: "grants:"
+    actions: [read]
+
+  # --- alumni -------------------------------------------------------------
+  - id: alumni-portal
+    effect: permit
+    description: Alumni reach their own portal
+    entitlements:
+      - urn:mace:campus.edu:entitlement:alumni:portal
+    resource_prefix: "alumni:"
+    actions: [read]
