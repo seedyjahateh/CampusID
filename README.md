@@ -66,6 +66,37 @@ credential handling should ship.
 Data-tier host ports are deliberately off-standard so the stack starts on a
 machine that already runs Postgres or Redis; override them in `.env`.
 
+### Second factors
+
+TOTP and WebAuthn need nothing beyond the base stack. Push approval needs the
+simulator:
+
+```sh
+docker compose --profile mfa up -d
+CAMPUSID_PUSH_URL=http://push-sim:8100 docker compose up -d broker
+```
+
+| Service | Address | Purpose |
+|---|---|---|
+| `push-sim` | http://localhost:8100 | Approve or deny pending push requests |
+
+**The push service is a simulator, and that boundary is real.** It stands in for
+Duo or Okta Verify so the broker's push flow can be built and demonstrated end to
+end, and it makes none of the guarantees a real one does: there is no device
+registration, no cryptographic binding to a phone, and no channel an attacker
+cannot open a browser tab onto. Anybody who can reach it can approve anybody's
+request. Its approval page says so in a banner, because a reviewer clicking
+Approve should not have to read the source to know what they are looking at.
+
+What *is* real is the shape around it — a request raised, waited on, and resolved
+as approved, denied or timed out, bound to the person who raised it, spendable
+once, and expiring on the broker's own clock as well as the service's. That half
+transfers to a genuine provider unchanged. The trust does not.
+
+TOTP, WebAuthn and recovery codes carry no such caveat: those are real
+implementations of RFC 6238, the WebAuthn assertion ceremony, and Argon2id-hashed
+single-use codes respectively.
+
 ## Tests
 
 ```sh
@@ -83,9 +114,9 @@ that reproduces the quickstart on a clean runner.
 |---|---|---|
 | M0 | Repo scaffold, data tier, migrations, CI | ✅ Complete |
 | M1 | SAML SP with the full assertion validation gate, two IdPs, discovery, federation registry, sessions, encrypted assertions | ✅ Complete |
-| M2 | Attribute release policy, OIDC provider, dual-protocol sample app | |
-| M3 | SCIM 2.0 provisioning, joiner/mover/leaver lifecycle | |
-| M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA | |
+| M2 | Attribute release policy, OIDC provider, dual-protocol sample app | ✅ Complete |
+| M3 | SCIM 2.0 provisioning, joiner/mover/leaver lifecycle | ✅ Complete |
+| M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA | Admin console outstanding |
 | M5 | Audit hash chain, dashboard, hardening, documentation | |
 
 ## Layout

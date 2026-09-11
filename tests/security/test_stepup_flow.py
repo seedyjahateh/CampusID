@@ -131,6 +131,9 @@ def wired(
     app.state.mfa_challenges = ChallengeStore(redis)
     app.state.mfa_limiter = AttemptLimiter(redis)
     app.state.decision_cache = decisions
+    # No push service. The factor is optional, and these tests are about the two
+    # that are not; `test_push_sim.py` wires one.
+    app.state.push = None
     app.state.audit = audit
     return app
 

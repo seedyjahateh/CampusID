@@ -34,7 +34,16 @@ from starlette.responses import Response
 
 from campusid.audit.events import EventType, Outcome
 from campusid.logging import get_logger
-from campusid.mfa import assurance, challenges, enrolment, models, ratelimit, totp, webauthn
+from campusid.mfa import (
+    assurance,
+    challenges,
+    enrolment,
+    models,
+    push,
+    ratelimit,
+    totp,
+    webauthn,
+)
 from campusid.mfa.ratelimit import LOCKED, RateLimited
 from campusid.mfa.store import DUPLICATE_LABEL, MfaError
 from campusid.saml.stores import utcnow
@@ -52,9 +61,11 @@ BAD_REQUEST = {"error": "invalid_request"}
 REJECTED = {"error": "verification_failed"}
 NOT_FOUND = {"error": "not_found"}
 STEP_UP_REQUIRED = {"error": "step_up_required"}
+PUSH_UNAVAILABLE = {"error": "push_unavailable"}
 
 MAX_LABEL = 128
 
+PUSH = "push"
 RECOVERY = "recovery"
 """The rate-limiter's name for the recovery path.
 
@@ -307,10 +318,18 @@ async def challenge(request: Request) -> JSONResponse:
     categories = await state.mfa.categories_for(session.person_uuid)
     credentials = await state.mfa.credential_ids(session.person_uuid)
 
+    available = set(categories)
+    if state.push is not None and state.push.configured:
+        # Push needs no enrolment in this deployment, because the simulator has
+        # no device to register. Offered to anybody, and labelled a simulation
+        # everywhere it appears.
+        available.add(PUSH)
+
     body: dict[str, Any] = {
         "acr": session.acr,
         "amr": list(session.amr),
-        "factors": sorted(categories),
+        "factors": sorted(available),
+        "simulated": [PUSH] if PUSH in available else [],
     }
     if credentials:
         body["webauthn"] = {
@@ -398,6 +417,78 @@ async def step_up_webauthn(request: Request) -> Response:
     return await _elevate(
         request, session, models.WEBAUTHN, str(assertion.credential_id.hex()[:16])
     )
+
+
+@router.post("/challenge/push")
+async def start_push(request: Request) -> Response:
+    """Raise a push approval and hand back its id (FR-MFA-03).
+
+    The service on the other end is a simulator and says so on its own approval
+    page. What is real is the shape: raised, waited on, resolved.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    client = request.app.state.push
+    if client is None or not client.configured:
+        # Not configured is a state an operator chose, the same as the directory.
+        # Reported as unavailable rather than as an error, because nothing is
+        # wrong.
+        return _refuse(PUSH_UNAVAILABLE, 503)
+
+    try:
+        await request.app.state.mfa_limiter.check(session.person_uuid, PUSH)
+    except RateLimited as exc:
+        return _locked(exc)
+
+    try:
+        request_id = await client.send(session.person_uuid)
+    except push.PushUnavailable:
+        return _refuse(PUSH_UNAVAILABLE, 503)
+
+    return JSONResponse(
+        {"id": request_id, "expires_in": int(push.WINDOW.total_seconds())},
+        status_code=201,
+        headers=NO_STORE,
+    )
+
+
+@router.post("/challenge/push/{request_id}")
+async def poll_push(request_id: str, request: Request) -> Response:
+    """Ask whether the push was approved, and elevate if it was.
+
+    Polled rather than waited on: holding the request open for a minute would
+    tie up a worker per pending approval and turn a slow push service into a
+    broker outage.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    client = request.app.state.push
+    if client is None or not client.configured:
+        return _refuse(PUSH_UNAVAILABLE, 503)
+
+    outcome = await client.outcome(session.person_uuid, request_id)
+    if outcome == push.PENDING:
+        # 202: nothing has happened and nothing is wrong. A 200 with a status
+        # field would make every caller read the body to find out whether to
+        # keep asking.
+        return JSONResponse({"status": push.PENDING}, status_code=202, headers=NO_STORE)
+    if outcome == push.UNAVAILABLE:
+        # Not counted as a failed attempt. Telling somebody their approval was
+        # refused when the service was down sends them to the service desk for
+        # the wrong problem, and locking them out for it would be worse.
+        return _refuse(PUSH_UNAVAILABLE, 503)
+    if outcome != push.APPROVED:
+        return await _failed(request, session, PUSH, f"mfa.push_{outcome}")
+
+    return await _elevate(request, session, PUSH, request_id, category=assurance.PUSH)
 
 
 @router.post("/challenge/recovery")

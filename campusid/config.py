@@ -130,6 +130,19 @@ class Settings(BaseSettings):
     `base_url` may not describe.
     """
 
+    push_url: str = ""
+    """Where the push-approval service lives. Empty disables the push factor.
+
+    Empty by default rather than pointing somewhere, for the reason `ldap_url` is:
+    a broker configured with a service it cannot reach fails on every attempt,
+    while a broker configured with none simply has no push factor.
+
+    The service this talks to is a **simulator** (FR-MFA-03). It has no device
+    registration and no cryptographic binding to a phone, and anybody who can
+    reach it can approve anybody's request. The flow around it is real; the trust
+    is not, and both the README and the simulator's own page say so.
+    """
+
     # --- Directory (FR-DIR-01, FR-DIR-02, FR-DIR-03) ---------------------
     ldap_url: str = ""
     """`ldaps://host:636` or `ldap://host:389`. Empty disables the integration.

@@ -2,6 +2,7 @@
 #
 # Week 0 brings up the data tier and an empty broker. Later milestones add
 # profiles: `federation` (Keycloak, SimpleSAMLphp), `directory` (OpenLDAP),
+# `mfa` (the push simulator),
 # `apps` (CampusPortal, LMS/analytics simulators), `observability`.
 #
 #   cp .env.example .env
@@ -47,6 +48,10 @@ x-broker-env: &broker-env
   # orphans every credential already registered.
   CAMPUSID_WEBAUTHN_RP_ID: ${CAMPUSID_WEBAUTHN_RP_ID:-localhost}
   CAMPUSID_WEBAUTHN_ORIGIN: ${CAMPUSID_WEBAUTHN_ORIGIN:-http://localhost:8000}
+  # The push simulator, when the `mfa` profile is up. Empty disables the push
+  # factor entirely, which is the right state for a deployment that has no push
+  # service rather than one whose push service is broken.
+  CAMPUSID_PUSH_URL: ${CAMPUSID_PUSH_URL:-}
   TZ: UTC
 
 services:
@@ -229,6 +234,32 @@ services:
     restart: "no"
     entrypoint: ["python"]
     command: ["scripts/directory_init.py"]
+
+  # A stand-in for Duo or Okta Verify, so the broker's push flow can be built
+  # and shown end to end (FR-MFA-03). It is a SIMULATOR: no device registration,
+  # no binding to a phone, and anybody who can reach it can approve anybody's
+  # request. Its own approval page says so in a banner, which is the point —
+  # a reviewer clicking Approve should not have to read the source.
+  #
+  # Its own image rather than a second entrypoint on the broker's, because the
+  # broker's runtime image must not carry a service that can approve second
+  # factors.
+  push-sim:
+    profiles: [mfa]
+    image: campusid/push-sim:dev
+    build:
+      context: docker/push-sim
+    ports:
+      - "${PUSH_SIM_PORT:-8100}:8100"
+    networks: [internal]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;urllib.request.urlopen('http://localhost:8100/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   # Test runner: the dev image, which adds the test toolchain. Not started by
   # `docker compose up` — invoke it explicitly:

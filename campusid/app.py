@@ -36,6 +36,7 @@ from campusid.lifecycle.sweeper import GraceSweeper
 from campusid.lifecycle.targets import LdapTarget
 from campusid.logging import configure_logging, get_logger
 from campusid.mfa.challenges import ChallengeStore
+from campusid.mfa.push import PushClient
 from campusid.mfa.ratelimit import AttemptLimiter
 from campusid.mfa.store import FactorStore
 from campusid.middleware import (
@@ -151,6 +152,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.mfa = FactorStore(session_factory, issuer=settings.service_name)
     app.state.mfa_challenges = ChallengeStore(redis)
     app.state.mfa_limiter = AttemptLimiter(redis)
+    # One client for the life of the process, like the logout notifier's, so a
+    # push does not pay a TCP handshake per poll.
+    push_http = httpx.AsyncClient()
+    app.state.push = (
+        PushClient(settings.push_url, redis, client=push_http) if settings.push_url else None
+    )
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)
@@ -239,6 +246,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # how a clean shutdown produces an alarming traceback.
         await sweeper.stop()
         await logout_http.aclose()
+        await push_http.aclose()
         await redis.aclose()
         await engine.dispose()
         log.info("broker.shutdown")
