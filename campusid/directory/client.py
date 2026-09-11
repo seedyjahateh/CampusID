@@ -32,7 +32,7 @@ from typing import Any, Final
 
 from campusid.directory.connection import Connector, DirectoryUnavailable
 from campusid.directory.groups import Expansion, expand
-from campusid.directory.profiles import DirectoryProfile
+from campusid.directory.profiles import ACCOUNT_DISABLED_BIT, DirectoryProfile
 from campusid.logging import get_logger
 
 __all__ = ["CACHE_PREFIX", "PAGE_SIZE", "DirectoryClient", "DirectoryUnavailable", "DirectoryUser"]
@@ -62,6 +62,12 @@ class DirectoryUser:
     given_name: str | None = None
     surname: str | None = None
     member_of: tuple[str, ...] = ()
+    disabled: bool = False
+    """Whether the directory considers this account disabled.
+
+    Read from the same search that found them. Reconciliation walks every person
+    and asking a second time for each would turn a report into an afternoon.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +292,26 @@ class DirectoryClient:
             given_name=_one(attributes, profile.given_name),
             surname=_one(attributes, profile.surname),
             member_of=tuple(_many(attributes, profile.member_of)),
+            disabled=self._disabled(attributes),
         )
+
+    def _disabled(self, attributes: dict[str, Any]) -> bool:
+        """Whether this directory says the account is off.
+
+        Two shapes, and they are read differently. Active Directory keeps a bit
+        field, so the question is whether one bit is set — a truthiness check
+        would call every enabled account disabled, because a normal account is
+        512. OpenLDAP writes a lock timestamp, so the question is whether there
+        is one at all.
+        """
+        profile = self._profile
+        if profile.disabled_flag:
+            raw = _one(attributes, profile.disabled_flag)
+            try:
+                return bool(int(raw or 0) & ACCOUNT_DISABLED_BIT)
+            except ValueError:
+                return False
+        return bool(_one(attributes, profile.lock_attribute))
 
 
 def _one(attributes: dict[str, Any], *names: str) -> str | None:

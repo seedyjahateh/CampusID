@@ -30,6 +30,19 @@ from typing import Final
 
 from campusid.directory.escaping import all_of, any_of, equality
 
+ACCOUNT_DISABLED_BIT: Final = 0x2
+"""Active Directory's `ADS_UF_ACCOUNTDISABLE`, inside `userAccountControl`.
+
+A bit rather than a value, which decides how both ends of the integration treat
+it. Reading it needs a mask — a truthiness check calls every enabled account
+disabled, because a normal account is 512. Writing it needs an or — assigning 2
+disables the account and clears every other flag on it, and the damage only
+shows up when somebody is re-enabled.
+"""
+
+DEFAULT_ACCOUNT_CONTROL: Final = 0x200
+"""`ADS_UF_NORMAL_ACCOUNT`, for an entry that carries no flags yet."""
+
 
 @dataclass(frozen=True, slots=True)
 class DirectoryProfile:
@@ -55,6 +68,17 @@ class DirectoryProfile:
     user_object_class: str
     group_object_class: str
 
+    create_object_classes: tuple[str, ...] = ()
+    """What to give a new person, including the auxiliary class its login
+    attribute needs.
+
+    Named here rather than decided at the writer, because it is the same fact as
+    `login_attributes`: a directory that identifies people by
+    `eduPersonPrincipalName` only accepts that attribute on an entry decorated
+    with `eduPerson`, and a writer that knew one without the other would create
+    entries the server refuses.
+    """
+
     mail: str = "mail"
     display_name: str = "displayName"
     given_name: str = "givenName"
@@ -64,6 +88,14 @@ class DirectoryProfile:
     """How this directory says an account is disabled, when it says so with a
     flag. `None` means disabling is expressed some other way — see
     `campusid.directory.writes`."""
+
+    lock_attribute: str = "pwdAccountLockedTime"
+    """The attribute that marks an account locked when there is no flag.
+
+    Named on the profile rather than assumed at the call sites, because both the
+    writer and the reconciler need it and a literal in two places is a literal
+    that eventually differs in one.
+    """
 
     def user_filter(self, login: str) -> str:
         """Find one person by whatever this directory calls a login.
@@ -112,9 +144,12 @@ class DirectoryProfile:
             self.given_name,
             self.surname,
             *self.login_attributes,
+            # Whichever way this directory expresses "disabled". Requested on
+            # every search so reconciliation can tell from the entry it already
+            # has: walking every person with a second round trip each would turn
+            # a report into an afternoon.
+            self.disabled_flag or self.lock_attribute,
         ]
-        if self.disabled_flag:
-            wanted.append(self.disabled_flag)
         return tuple(dict.fromkeys(wanted))
 
 
@@ -129,6 +164,7 @@ ACTIVE_DIRECTORY: Final = DirectoryProfile(
     group_name="cn",
     user_object_class="user",
     group_object_class="group",
+    create_object_classes=("user", "organizationalPerson", "person", "top"),
     disabled_flag="userAccountControl",
 )
 """Active Directory.
@@ -147,6 +183,10 @@ OPENLDAP: Final = DirectoryProfile(
     group_name="cn",
     user_object_class="inetOrgPerson",
     group_object_class="groupOfNames",
+    # `eduPerson` is auxiliary, so it decorates the structural class rather than
+    # replacing it — and without it the server refuses the very attribute this
+    # profile searches on.
+    create_object_classes=("inetOrgPerson", "organizationalPerson", "person", "eduPerson", "top"),
     disabled_flag=None,
 )
 """OpenLDAP with the eduPerson schema.

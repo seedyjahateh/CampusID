@@ -27,26 +27,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any
 
 from campusid.directory.connection import LOCKED_FOREVER, DirectoryUnavailable
 from campusid.directory.escaping import escape_dn
-from campusid.directory.profiles import DirectoryProfile
+from campusid.directory.profiles import (
+    ACCOUNT_DISABLED_BIT,
+    DEFAULT_ACCOUNT_CONTROL,
+    DirectoryProfile,
+)
 from campusid.logging import get_logger
 
 log = get_logger(__name__)
-
-ACCOUNT_DISABLED_BIT: Final = 0x2
-"""Active Directory's `ADS_UF_ACCOUNTDISABLE`.
-
-Or-ed into whatever `userAccountControl` already holds. Assigning `2` outright is
-the classic mistake: it disables the account and clears `DONT_EXPIRE_PASSWORD`,
-`NORMAL_ACCOUNT` and everything else in the same write, and the damage only shows
-up when somebody is re-enabled.
-"""
-
-DEFAULT_ACCOUNT_CONTROL: Final = 0x200
-"""`ADS_UF_NORMAL_ACCOUNT`, for an entry that carries no flags yet."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +170,7 @@ class DirectoryWriter:
         flag = self._profile.disabled_flag
         connection = self._connector()
         try:
-            attribute = flag or "pwdAccountLockedTime"
+            attribute = flag or self._profile.lock_attribute
             current = self._read(connection, dn, [attribute])
             if current is None:
                 # An entry that is not there cannot be disabled, and pretending
@@ -249,13 +241,12 @@ class DirectoryWriter:
     def _object_classes(self) -> list[str]:
         """What a new person is.
 
-        Named from the profile so the same writer creates an `inetOrgPerson` in
+        Taken from the profile so the same writer creates an `inetOrgPerson` in
         OpenLDAP and a `user` in Active Directory without knowing which it is
-        talking to.
+        talking to — and so the auxiliary class its login attribute needs comes
+        along with it.
         """
-        if self._profile.user_object_class == "user":
-            return ["user", "organizationalPerson", "person", "top"]
-        return ["inetOrgPerson", "organizationalPerson", "person", "top"]
+        return list(self._profile.create_object_classes)
 
     def _attributes(self, spec: PersonSpec) -> dict[str, Any]:
         profile = self._profile

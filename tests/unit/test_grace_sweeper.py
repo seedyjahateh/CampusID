@@ -38,6 +38,25 @@ async def _run_briefly(sweeper: GraceSweeper, seconds: float = 0.05) -> None:
     await sweeper.stop()
 
 
+async def _run_until(
+    sweeper: GraceSweeper, lifecycle: _Lifecycle, calls: int, *, timeout: float = 2.0
+) -> None:
+    """Run until the sweep has happened `calls` times, or give up.
+
+    Polled rather than slept through a fixed window. A test that starts a task
+    and waits a fixed fifty milliseconds passes on an idle machine and fails on
+    a busy one, which is a flake that costs more attention than the test is
+    worth.
+    """
+    sweeper.start()
+    deadline = asyncio.get_running_loop().time() + timeout
+    try:
+        while lifecycle.calls < calls and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.005)
+    finally:
+        await sweeper.stop()
+
+
 async def test_a_sweep_revokes_what_is_due() -> None:
     lifecycle = _Lifecycle([3])
     sweeper = GraceSweeper(lifecycle)
@@ -49,9 +68,9 @@ async def test_the_loop_keeps_sweeping() -> None:
     lifecycle = _Lifecycle([1, 1, 1])
     sweeper = GraceSweeper(lifecycle, interval=BRIEF, startup_delay=NOTHING)
 
-    await _run_briefly(sweeper)
+    await _run_until(sweeper, lifecycle, calls=2)
 
-    assert lifecycle.calls > 1
+    assert lifecycle.calls >= 2
 
 
 async def test_a_failed_sweep_does_not_stop_the_loop() -> None:
@@ -60,9 +79,9 @@ async def test_a_failed_sweep_does_not_stop_the_loop() -> None:
     lifecycle = _Lifecycle([RuntimeError("connection reset"), 1, 1])
     sweeper = GraceSweeper(lifecycle, interval=BRIEF, startup_delay=NOTHING)
 
-    await _run_briefly(sweeper)
+    await _run_until(sweeper, lifecycle, calls=2)
 
-    assert lifecycle.calls > 1
+    assert lifecycle.calls >= 2
 
 
 async def test_stopping_waits_for_the_task() -> None:

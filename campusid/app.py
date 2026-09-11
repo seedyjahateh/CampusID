@@ -25,6 +25,7 @@ from campusid.identity.registry import IdentityRegistry
 from campusid.keys import load_or_create
 from campusid.lifecycle.deadletter import DeadLetterQueue
 from campusid.lifecycle.orchestrator import LifecycleOrchestrator
+from campusid.lifecycle.reconciliation import Reconciler
 from campusid.lifecycle.rules import RulesStore
 from campusid.lifecycle.store import LifecycleStore
 from campusid.lifecycle.sweeper import GraceSweeper
@@ -181,6 +182,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         on_transition=app.state.lifecycle_orchestrator.transitioned,
     )
     app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
+
+    # Reconciliation is on demand rather than on a timer. It walks every person
+    # and asks the directory about each, which is a job an operator schedules
+    # for a quiet hour rather than something the broker should decide to do to
+    # itself while serving logins.
+    app.state.reconciler = (
+        Reconciler(
+            session_factory,
+            client=app.state.directory,
+            target=LdapTarget(client=app.state.directory, writer=app.state.directory_writer),
+        )
+        if app.state.directory is not None
+        else None
+    )
 
     # What ends a grace period is somebody looking. The deadline is durable
     # because it is a column; this is the process that reads it.

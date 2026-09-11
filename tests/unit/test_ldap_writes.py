@@ -18,12 +18,8 @@ from typing import Any
 import pytest
 
 from campusid.directory.connection import LOCKED_FOREVER, DirectoryUnavailable
-from campusid.directory.profiles import ACTIVE_DIRECTORY, OPENLDAP
-from campusid.directory.writes import (
-    ACCOUNT_DISABLED_BIT,
-    DirectoryWriter,
-    PersonSpec,
-)
+from campusid.directory.profiles import ACCOUNT_DISABLED_BIT, ACTIVE_DIRECTORY, OPENLDAP
+from campusid.directory.writes import DirectoryWriter, PersonSpec
 
 BASE = "dc=campus,dc=test"
 SAM = f"uid=sam.obrien,ou=people,{BASE}"
