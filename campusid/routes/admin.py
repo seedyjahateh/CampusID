@@ -36,13 +36,16 @@ from typing import Any, Final
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from campusid.audit.events import EventType, Outcome
+from campusid.authz.engine import AAL1
+from campusid.config import Environment
 from campusid.errors import MetadataRejected, ReasonCode
 from campusid.logging import get_logger
 from campusid.mfa import assurance
 from campusid.saml.parser import MAX_DOCUMENT_BYTES
-from campusid.session.cookies import SESSION_COOKIE
+from campusid.session.cookies import SESSION_COOKIE, set_session_cookie
 
 log = get_logger(__name__)
 
@@ -57,6 +60,20 @@ NOT_FOUND: Final = {"error": "not_found"}
 STEP_UP_REQUIRED: Final = {"error": "step_up_required"}
 BAD_REQUEST: Final = {"error": "invalid_request"}
 REASON_REQUIRED: Final = {"error": "reason_required"}
+NOT_A_FIXTURE: Final = {"error": "not_a_fixture_account"}
+
+IMPERSONATION_ISSUER: Final = "urn:campusid:impersonation"
+"""The `idp_entity_id` on an impersonated session.
+
+Not the campus IdP's. Nothing authenticated here, and recording an entity that
+did not assert anything would put a lie in the one field an investigator uses to
+ask where a session came from.
+"""
+
+IMPERSONATION_WARNING: Final = (
+    "You are acting as another user. Every action is recorded against your own "
+    "account with impersonation: true."
+)
 
 MAX_REASON: Final = 512
 
@@ -297,6 +314,104 @@ async def set_enabled(entity_id: str, request: Request) -> JSONResponse:
         detail={"entity_id": entity_id, "enabled": enabled},
     )
     return JSONResponse({"entity_id": entity_id, "enabled": enabled}, headers=NO_STORE)
+
+
+# --- impersonation (FR-ADM-03) ----------------------------------------------
+
+
+@router.post("/impersonate")
+async def impersonate(request: Request) -> Response:
+    """Act as a fixture user, so an SP integration can be tested (FR-ADM-03).
+
+    **The endpoint does not exist in production.** Not disabled, not guarded by a
+    flag somebody can flip — absent, answering 404 the way any unrouted path
+    does. A feature that can be re-enabled by configuration is a feature an
+    attacker can re-enable by configuration, and "act as any user" is the one
+    capability where that trade has no upside.
+
+    **Only fixture users.** The set is enumerated from configuration rather than
+    inferred, because "a test account" is not a property anybody can read off a
+    row, and a rule like "accounts whose name starts with test" is a rule
+    somebody will name a real person into.
+
+    **Every session it mints is marked, and the mark is on the session.** So it
+    survives rotation, cannot be lost between two stores disagreeing, and there
+    is no way to hold an impersonated session that does not know it is one.
+    Everything the session then does is audited with `impersonation: true`,
+    merged in where the event is written rather than at each call site.
+    """
+    settings = request.app.state.settings
+    if settings.environment is Environment.PRODUCTION:
+        # Answered before the guard, so it is not even an authenticated probe.
+        # A 404 here is indistinguishable from a build that never had the route.
+        return _refuse(NOT_FOUND, 404)
+
+    try:
+        caller = await _admin(request)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    body = await _json(request)
+    reason = _reason(body)
+    if reason is None:
+        return _refuse(REASON_REQUIRED, 400)
+
+    subject = str(body.get("subject") or "").strip()
+    if subject not in settings.impersonation_fixture_set:
+        # Refused rather than confirmed either way: the answer to "is this a
+        # real account" is not something this endpoint should be able to give.
+        await _record(
+            request,
+            caller,
+            Outcome.DENIED,
+            action="impersonate",
+            reason=reason,
+            detail={"subject": subject},
+        )
+        return _refuse(NOT_A_FIXTURE, 403)
+
+    resolved = await request.app.state.identity.person_for(subject)
+    if resolved is None:
+        return _refuse(NOT_FOUND, 404)
+
+    session = await request.app.state.sessions.create(
+        idp_entity_id=IMPERSONATION_ISSUER,
+        name_id=subject,
+        # Single-factor by construction. An impersonated session must not be
+        # able to reach the console that minted it, or an administrator could
+        # impersonate their way into administering as somebody else.
+        acr=AAL1,
+        amr=(),
+        person_uuid=str(resolved),
+        impersonated_by=caller.person_uuid,
+    )
+
+    await _record(
+        request,
+        caller,
+        Outcome.SUCCESS,
+        action="impersonate",
+        reason=reason,
+        detail={"subject": subject, "person_uuid": str(resolved)},
+    )
+    response = JSONResponse(
+        {
+            "subject": subject,
+            "person_uuid": str(resolved),
+            # Said in the response as well as in the trail, so a console cannot
+            # render an impersonated session as an ordinary one by omission.
+            "impersonation": True,
+            "impersonated_by": caller.person_uuid,
+            "warning": IMPERSONATION_WARNING,
+        },
+        status_code=201,
+        headers=NO_STORE,
+    )
+    # The administrator's own session is replaced, not supplemented. Holding both
+    # at once is how somebody performs an administrative action believing they
+    # are the fixture user, or the reverse.
+    set_session_cookie(response, session.sid)
+    return response
 
 
 # --- helpers ----------------------------------------------------------------

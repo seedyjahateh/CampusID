@@ -130,6 +130,24 @@ class Settings(BaseSettings):
     `base_url` may not describe.
     """
 
+    impersonation_fixtures: str = ""
+    """The ePPNs an administrator may act as for testing, comma-separated
+    (FR-ADM-03).
+
+    Enumerated rather than inferred. "A test account" is not a property anybody
+    can read off a row, and a rule like "accounts whose name starts with test" is
+    a rule somebody will eventually name a real person into.
+
+    A comma-separated string rather than a list, because pydantic-settings reads
+    a sequence field from the environment as JSON — so the natural empty value
+    fails to parse and the operator's first encounter with this setting is a
+    broker that will not start.
+
+    Empty by default, so a deployment that has not chosen any has the capability
+    switched off rather than pointed at whoever happens to match. The endpoint is
+    absent in production regardless of what this holds.
+    """
+
     push_url: str = ""
     """Where the push-approval service lives. Empty disables the push factor.
 
@@ -291,6 +309,18 @@ class Settings(BaseSettings):
     @property
     def pairwise_salt_bytes(self) -> bytes:
         return self.pairwise_salt.encode("utf-8")
+
+    @property
+    def impersonation_fixture_set(self) -> frozenset[str]:
+        """The fixture ePPNs, parsed once (FR-ADM-03).
+
+        Blank entries are dropped rather than kept, because a trailing comma
+        would otherwise put the empty string in the set — and a subject field
+        nobody filled in would then match it.
+        """
+        return frozenset(
+            entry.strip() for entry in self.impersonation_fixtures.split(",") if entry.strip()
+        )
 
     # All four derive from `base_url`, so there is exactly one place a
     # deployment's identity is configured. An entityID that drifted from the

@@ -38,6 +38,34 @@ log = get_logger(__name__)
 
 _correlation_id: contextvars.ContextVar[str] = contextvars.ContextVar("correlation_id")
 
+_impersonator: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "impersonator", default=None
+)
+"""Who is acting as somebody else on this request, if anybody (FR-ADM-03).
+
+A contextvar for the same reason the correlation id is one, and the argument is
+stronger here. The requirement is that *every* downstream event carries the
+marker, and a parameter threaded through forty call sites is a parameter somebody
+forgets at the forty-first — producing exactly the event an investigation needs
+and cannot find. Set once, where the session is loaded, and read once, where the
+event is written.
+"""
+
+
+def set_impersonator(value: str | None) -> None:
+    """Record that this request is being made by somebody acting as another.
+
+    Called by the session store on every load, with `None` for an ordinary
+    session — so the marker cannot leak from one request to the next on a reused
+    worker, which is the failure mode that would attach an administrator's name
+    to a stranger's login.
+    """
+    _impersonator.set(value)
+
+
+def impersonator() -> str | None:
+    return _impersonator.get()
+
 
 def new_correlation_id() -> str:
     """A fresh id for one chain of events.
@@ -91,6 +119,15 @@ class AuditLog:
         reading the database back, and so the emitter stays the only thing that
         knows how a field is populated.
         """
+        acting_as = impersonator()
+        if acting_as is not None:
+            # FR-ADM-03. Merged here rather than at the call site, for the same
+            # reason redaction is: a rule enforced in one place is a rule, and
+            # this one has to hold for *every* downstream event or the trail
+            # quietly credits an administrator's actions to the person they were
+            # impersonating.
+            detail = {**(detail or {}), "impersonation": True, "impersonated_by": acting_as}
+
         event = AuditEvent(
             event_type=event_type,
             outcome=outcome,

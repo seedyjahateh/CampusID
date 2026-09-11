@@ -97,6 +97,20 @@ TOTP, WebAuthn and recovery codes carry no such caveat: those are real
 implementations of RFC 6238, the WebAuthn assertion ceremony, and Argon2id-hashed
 single-use codes respectively.
 
+### Administration
+
+The admin API lives under `/admin` and is protected by the broker it
+administers: no separate password, no bypass, no token in the environment.
+Reaching it needs a session, the `iam-admin` role and AAL2. Somebody without the
+role gets a 404 rather than a 403, so the console's existence is not something an
+ordinary account can confirm.
+
+`POST /admin/impersonate` lets an administrator act as a fixture account to test
+an SP integration. **It does not exist in production** — absent, not disabled —
+and it will only assume accounts named in `CAMPUSID_IMPERSONATION_FIXTURES`.
+Every action the resulting session takes is recorded against the administrator
+who started it with `impersonation: true`.
+
 ## Tests
 
 ```sh
@@ -116,7 +130,7 @@ that reproduces the quickstart on a clean runner.
 | M1 | SAML SP with the full assertion validation gate, two IdPs, discovery, federation registry, sessions, encrypted assertions | ✅ Complete |
 | M2 | Attribute release policy, OIDC provider, dual-protocol sample app | ✅ Complete |
 | M3 | SCIM 2.0 provisioning, joiner/mover/leaver lifecycle | ✅ Complete |
-| M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA | Admin console outstanding |
+| M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA, admin API | ✅ Complete |
 | M5 | Audit hash chain, dashboard, hardening, documentation | |
 
 ## Layout

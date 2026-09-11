@@ -52,6 +52,11 @@ x-broker-env: &broker-env
   # factor entirely, which is the right state for a deployment that has no push
   # service rather than one whose push service is broken.
   CAMPUSID_PUSH_URL: ${CAMPUSID_PUSH_URL:-}
+  # Which fixture accounts an administrator may act as for SP testing. Empty
+  # switches the capability off; the endpoint is absent in production whatever
+  # this holds. Enumerated rather than inferred, because "a test account" is not
+  # a property anybody can read off a row.
+  CAMPUSID_IMPERSONATION_FIXTURES: ${CAMPUSID_IMPERSONATION_FIXTURES:-}
   TZ: UTC
 
 services:

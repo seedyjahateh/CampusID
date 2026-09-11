@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Final
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -470,6 +471,19 @@ class IdentityRegistry:
             return list(await session.scalars(statement.order_by(Identifier.issued_at)))
 
     # --- people -----------------------------------------------------------
+
+    async def person_for(self, eppn: str) -> UUID | None:
+        """Who holds this ePPN right now, if anybody does.
+
+        The same three conditions the login path uses: the identifier matches, it
+        is not tombstoned, and the person is active. A looser lookup here would
+        make a tombstoned ePPN resolvable through one door and not the other,
+        which is the reuse incident FR-LC-08 exists to prevent wearing a
+        different hat.
+        """
+        async with self._sessions() as session:
+            person = await self._by_live_eppn(session, eppn)
+            return person.person_uuid if person is not None else None
 
     async def get(self, person_uuid: str) -> Person | None:
         async with self._sessions() as session:

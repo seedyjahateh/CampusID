@@ -24,6 +24,7 @@ from typing import Any, Final
 
 from redis.asyncio import Redis
 
+from campusid.audit.log import set_impersonator
 from campusid.cache import expire_key, set_add, set_members, set_remove
 from campusid.saml.stores import utcnow
 
@@ -70,6 +71,15 @@ class Session:
     Optional only because a session may predate the resolution — a stored
     session written before this field existed still loads. Every session
     established after M3 carries one.
+    """
+
+    impersonated_by: str | None = None
+    """The administrator acting as this person, if anybody is (FR-ADM-03).
+
+    Null for every real session, which is the point: the marker is on the
+    session rather than tracked separately, so it survives rotation, it cannot be
+    lost between two stores disagreeing, and there is no way to hold an
+    impersonated session that does not know it is one.
     """
 
     @property
@@ -132,6 +142,7 @@ class SessionStore:
         session_index: str | None = None,
         attributes: dict[str, list[str]] | None = None,
         person_uuid: str | None = None,
+        impersonated_by: str | None = None,
         now: datetime | None = None,
     ) -> Session:
         """Start a session and return it."""
@@ -150,6 +161,7 @@ class SessionStore:
             session_index=session_index,
             attributes=attributes or {},
             person_uuid=person_uuid,
+            impersonated_by=impersonated_by,
         )
         await self._write(session)
         return session
@@ -170,6 +182,13 @@ class SessionStore:
         if now >= session.absolute_expiry or now - session.last_seen_at >= self._idle:
             await self.destroy(sid)
             return None
+
+        # The single choke point for FR-ADM-03's marker. Every route reaches a
+        # session through here, so setting it once means no route has to
+        # remember — and it is set to None for an ordinary session rather than
+        # left alone, so the marker cannot survive into the next request on a
+        # reused worker.
+        set_impersonator(session.impersonated_by)
 
         touched = _replace(session, last_seen_at=now)
         await self._write(touched, now=now)
@@ -290,6 +309,7 @@ CARRIED_FORWARD: Final[tuple[str, ...]] = (
     "session_index",
     "attributes",
     "person_uuid",
+    "impersonated_by",
 )
 """Every field a rotation or a touch carries over.
 
