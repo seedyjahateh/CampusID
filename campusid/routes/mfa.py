@@ -34,7 +34,7 @@ from starlette.responses import Response
 
 from campusid.audit.events import EventType, Outcome
 from campusid.logging import get_logger
-from campusid.mfa import assurance, challenges, models, ratelimit, totp, webauthn
+from campusid.mfa import assurance, challenges, enrolment, models, ratelimit, totp, webauthn
 from campusid.mfa.ratelimit import LOCKED, RateLimited
 from campusid.mfa.store import DUPLICATE_LABEL, MfaError
 from campusid.saml.stores import utcnow
@@ -554,6 +554,44 @@ async def _invalidate(state: Any, person_uuid: str) -> None:
     cache = getattr(state, "decision_cache", None)
     if cache is not None:
         await cache.invalidate(person_uuid)
+
+
+@router.get("/enrolment")
+async def enrolment_requirement(request: Request) -> JSONResponse:
+    """Whether this person must enrol a second factor before going further.
+
+    Computed from what they are entitled to rather than stored, because a role
+    granted this morning has to count this afternoon and a stored flag is a copy
+    of a fact that changes in a different file.
+
+    Reported rather than enforced. Refusing the session outright would lock out
+    the person whose phone broke the day their new role landed, which is a
+    helpdesk call rather than a security improvement.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    state = request.app.state
+    required = enrolment.requirement(
+        entitlements=set(await state.lifecycle.held(uuid.UUID(session.person_uuid))),
+        roles=set(await state.role_assignments.roles_for(session.person_uuid)),
+        rules=state.lifecycle_rules.current,
+        catalogue=state.roles.current,
+        has_factor=await state.mfa.has_factor(session.person_uuid),
+    )
+    return JSONResponse(
+        {
+            "required": required.required,
+            # Named rather than counted: "you must enrol" with no reason reads as
+            # an arbitrary imposition, and an operator asked why somebody is
+            # being prompted is otherwise comparing two config files by hand.
+            "reasons": list(required.reasons),
+        },
+        headers=NO_STORE,
+    )
 
 
 @router.get("/factors")

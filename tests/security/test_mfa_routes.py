@@ -16,6 +16,7 @@ import base64
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,6 +25,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from campusid.audit.events import EventType
+from campusid.authz.roles import RoleStore
+from campusid.lifecycle.rules import RulesStore
 from campusid.mfa import totp, webauthn
 from campusid.mfa.challenges import ChallengeStore
 from campusid.mfa.store import DUPLICATE_LABEL, NO_FACTOR, Enrolment, MfaError
@@ -59,6 +62,7 @@ class _Factors:
         self.disabled: list[tuple[str, uuid.UUID]] = []
         self.credentials: list[bytes] = []
         self.registered: list[tuple[str, dict[str, Any]]] = []
+        self.has_any = False
         self.raises: Exception | None = None
 
     async def begin_totp(self, person_uuid: str, *, label: str, account: str) -> Enrolment:
@@ -86,6 +90,9 @@ class _Factors:
 
     async def credential_ids(self, person_uuid: str) -> list[bytes]:
         return list(self.credentials)
+
+    async def has_factor(self, person_uuid: str) -> bool:
+        return self.has_any
 
     async def register_webauthn(self, person_uuid: str, **kwargs: Any) -> uuid.UUID:
         if self.raises is not None:
@@ -533,6 +540,83 @@ async def test_webauthn_registration_needs_a_resolved_person(
     session = await _session(wired, person=None)
 
     assert (await http.post("/mfa/webauthn", json={}, cookies=_cookie(session))).status_code == 409
+
+
+# --- forced enrolment -------------------------------------------------------
+
+
+class _Lifecycle:
+    def __init__(self, held: set[str]) -> None:
+        self._held = held
+
+    async def held(self, person_uuid: uuid.UUID) -> set[str]:
+        return set(self._held)
+
+
+class _Assignments:
+    def __init__(self, roles: set[str]) -> None:
+        self._roles = roles
+
+    async def roles_for(self, person_uuid: str) -> set[str]:
+        return set(self._roles)
+
+
+def _wire_enrolment(
+    wired: FastAPI, *, entitlements: set[str] | None = None, roles: set[str] | None = None
+) -> None:
+    wired.state.lifecycle = _Lifecycle(entitlements or set())
+    wired.state.role_assignments = _Assignments(roles or set())
+    wired.state.lifecycle_rules = RulesStore(Path("/app/config/lifecycle_rules.yaml"))
+    wired.state.roles = RoleStore(Path("/app/config/roles.yaml"))
+
+
+async def test_somebody_who_needs_a_factor_is_told_so(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    """FR-MFA-07. Reaching a resource that demands AAL2 with no factor
+    registered is a dead end, not a prompt."""
+    session = await _session(wired)
+    _wire_enrolment(wired, entitlements={"urn:mace:campus.edu:entitlement:vpn:access"})
+    factors.has_any = False
+
+    body = (await http.get("/mfa/enrolment", cookies=_cookie(session))).json()
+
+    assert body["required"] is True
+    assert body["reasons"] == ["urn:mace:campus.edu:entitlement:vpn:access"]
+
+
+async def test_somebody_already_enrolled_is_not(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    session = await _session(wired)
+    _wire_enrolment(wired, entitlements={"urn:mace:campus.edu:entitlement:vpn:access"})
+    factors.has_any = True
+
+    body = (await http.get("/mfa/enrolment", cookies=_cookie(session))).json()
+
+    assert body["required"] is False
+
+
+async def test_somebody_with_nothing_demanding_is_not(http: AsyncClient, wired: FastAPI) -> None:
+    """A prompt that is noise is a prompt people click past."""
+    session = await _session(wired)
+    _wire_enrolment(wired, entitlements={"urn:mace:campus.edu:entitlement:mail:alias"})
+
+    body = (await http.get("/mfa/enrolment", cookies=_cookie(session))).json()
+
+    assert body["required"] is False
+    assert body["reasons"] == []
+
+
+async def test_the_requirement_needs_a_session(http: AsyncClient) -> None:
+    assert (await http.get("/mfa/enrolment")).status_code == 401
+
+
+async def test_the_requirement_needs_a_resolved_person(http: AsyncClient, wired: FastAPI) -> None:
+    session = await _session(wired, person=None)
+    _wire_enrolment(wired)
+
+    assert (await http.get("/mfa/enrolment", cookies=_cookie(session))).status_code == 409
 
 
 # --- listing ----------------------------------------------------------------
