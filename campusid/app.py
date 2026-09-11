@@ -50,6 +50,7 @@ from campusid.oidc.logout import ClientSessionIndex, LogoutNotifier
 from campusid.oidc.par import PushedRequestStore
 from campusid.oidc.registry import ClientRegistry
 from campusid.policy.loader import PolicyStore
+from campusid.routes import admin as admin_routes
 from campusid.routes import disco as disco_routes
 from campusid.routes import logout as logout_routes
 from campusid.routes import mfa as mfa_routes
@@ -155,6 +156,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # One client for the life of the process, like the logout notifier's, so a
     # push does not pay a TCP handshake per poll.
     push_http = httpx.AsyncClient()
+    # Fetching a partner's published metadata. Redirects are not followed: a
+    # server-side fetch of an operator-supplied URL that chases redirects is how
+    # an allowlisted address becomes an arbitrary one.
+    app.state.metadata_http = httpx.AsyncClient(follow_redirects=False)
     app.state.push = (
         PushClient(settings.push_url, redis, client=push_http) if settings.push_url else None
     )
@@ -247,6 +252,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await sweeper.stop()
         await logout_http.aclose()
         await push_http.aclose()
+        await app.state.metadata_http.aclose()
         await redis.aclose()
         await engine.dispose()
         log.info("broker.shutdown")
@@ -331,5 +337,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(logout_routes.router)
     app.include_router(scim_routes.router)
     app.include_router(mfa_routes.router)
+    app.include_router(admin_routes.router)
 
     return app
