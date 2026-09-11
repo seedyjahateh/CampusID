@@ -119,6 +119,24 @@ class GroupStore:
             group = await self._load(session, group_id)
             return await self._project(session, group, with_members=with_members)
 
+    async def groups_for(self, person_uuid: str) -> list[tuple[str, str]]:
+        """Which groups one person belongs to, as (id, display name) pairs.
+
+        The reverse of the membership question the rest of this module asks, and
+        the one an administrator looking at a person needs. It reads the member
+        table directly rather than scanning groups, which is what the index on
+        `person_uuid` is there for — the alternative walks every group to find
+        the handful somebody is in.
+        """
+        async with self._sessions() as session:
+            rows = await session.execute(
+                select(ScimGroup.group_uuid, ScimGroup.display_name)
+                .join(ScimGroupMember, ScimGroupMember.group_uuid == ScimGroup.group_uuid)
+                .where(ScimGroupMember.person_uuid == uuid.UUID(person_uuid))
+                .order_by(ScimGroup.display_name)
+            )
+            return [(str(group_uuid), str(name)) for group_uuid, name in rows]
+
     async def search(
         self,
         *,

@@ -30,6 +30,7 @@ defaulted, because a default reason is a field everybody stops reading.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -39,6 +40,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response, StreamingResponse
 
+from campusid.admin.people import as_json as person_json
 from campusid.audit.dashboard import DEFAULT_STEP, DEFAULT_WINDOW, Window
 from campusid.audit.dashboard import as_json as dashboard_json
 from campusid.audit.events import EventType, Outcome
@@ -337,6 +339,90 @@ async def set_enabled(entity_id: str, request: Request) -> JSONResponse:
         detail={"entity_id": entity_id, "enabled": enabled},
     )
     return JSONResponse({"entity_id": entity_id, "enabled": enabled}, headers=NO_STORE)
+
+
+# --- people (FR-ADM-04, FR-ADM-06) ------------------------------------------
+
+
+@router.get("/people/{person_uuid}")
+async def person(person_uuid: str, request: Request) -> JSONResponse:
+    """Everything the broker knows about one person (FR-ADM-04).
+
+    The question a service desk actually asks: somebody says they cannot reach a
+    system, and the person on the other end needs to see what the broker believes
+    about them without opening six tables.
+
+    Open to auditors as well as administrators. Answering "why does this
+    application see my name" is reading, and it should not require the rights to
+    change the answer.
+    """
+    try:
+        await _admin(request, roles=READERS)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    if not _is_uuid(person_uuid):
+        return _refuse(NOT_FOUND, 404)
+
+    view = await request.app.state.people.view(person_uuid)
+    if view is None:
+        return _refuse(NOT_FOUND, 404)
+    return JSONResponse(person_json(view), headers=NO_STORE)
+
+
+@router.post("/people/{person_uuid}/sessions/terminate")
+async def terminate_sessions(person_uuid: str, request: Request) -> JSONResponse:
+    """End one of a person's sessions, or all of them (FR-ADM-06).
+
+    Administrators only, unlike the view beside it: ending somebody's session is
+    a change, and an auditor reads.
+
+    Sessions are addressed by the abbreviated handle the view shows rather than
+    by the session identifier, because the identifier is a credential and a
+    console that had to put one in a URL would be putting it in a browser
+    history.
+    """
+    try:
+        caller = await _admin(request)
+    except Refused as exc:
+        return _refuse(exc.body, exc.status)
+
+    if not _is_uuid(person_uuid):
+        return _refuse(NOT_FOUND, 404)
+
+    body = await _json(request)
+    reason = _reason(body)
+    if reason is None:
+        return _refuse(REASON_REQUIRED, 400)
+
+    handle = str(body.get("handle") or "").strip() or None
+    ended = await request.app.state.people.terminate(person_uuid, handle)
+
+    await request.app.state.audit.record(
+        EventType.SESSION_TERMINATED,
+        Outcome.SUCCESS,
+        actor=caller.person_uuid,
+        subject=person_uuid,
+        reason=reason,
+        session_id=caller.sid,
+        # The handles, not the identifiers. An audit record is read by more
+        # people than a session identifier should be.
+        detail={"sessions": ended, "scope": "one" if handle else "all"},
+    )
+    return JSONResponse({"terminated": ended}, headers=NO_STORE)
+
+
+def _is_uuid(value: str) -> bool:
+    """Whether a path segment could be a person at all.
+
+    Checked before the store, so a malformed id is a 404 rather than a database
+    error — and so the two are indistinguishable to somebody guessing.
+    """
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 # --- the audit trail (FR-AUD-03) --------------------------------------------

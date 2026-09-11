@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI
 
 from campusid import __version__, health
+from campusid.admin.people import PersonDirectory
 from campusid.audit.dashboard import DashboardStore
 from campusid.audit.log import AuditLog
 from campusid.audit.query import AuditQueryStore
@@ -219,6 +220,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         on_transition=app.state.lifecycle_orchestrator.transitioned,
     )
     app.state.scim_groups = GroupStore(session_factory, issuer=settings.oidc_issuer)
+
+    # Composed from the stores that own each fact rather than querying for
+    # itself, so an administrator's view cannot be a second opinion about the
+    # same rows (FR-ADM-04).
+    app.state.people = PersonDirectory(
+        identity=app.state.identity,
+        lifecycle=app.state.lifecycle,
+        roles=app.state.role_assignments,
+        factors=app.state.mfa,
+        sessions=app.state.sessions,
+        audit=app.state.audit_query,
+        groups=app.state.scim_groups,
+    )
 
     # Reconciliation is on demand rather than on a timer. It walks every person
     # and asks the directory about each, which is a job an operator schedules
