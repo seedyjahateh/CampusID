@@ -155,3 +155,43 @@ class MfaFactor(Base):
         # account they do not.
         Index("uq_mfa_factor_credential", "credential_id", unique=True),
     )
+
+
+class RecoveryCode(Base):
+    """One single-use code from a person's recovery sheet (FR-MFA-05).
+
+    A row per code rather than a set on the person, because "which code was used
+    and when" is the question an investigation asks after somebody recovers an
+    account they should not have. A column holding ten hashes could not answer
+    it.
+
+    Spent rather than deleted, for the same reason. The row stays with a
+    `used_at`, so a sheet that was used twice is visible instead of merely
+    absent.
+    """
+
+    __tablename__ = "mfa_recovery_code"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    person_uuid: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("person.person_uuid"), nullable=False
+    )
+    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    """Argon2id. The one credential here that gets written down, so the cost of
+    completing a partially-known one is the thing being bought."""
+
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """When a reissue retired this code.
+
+    Distinct from `used_at` because they mean different things to somebody
+    reading the trail: one is a person recovering their account, the other is a
+    sheet being replaced.
+    """
+
+    __table_args__ = (Index("ix_mfa_recovery_code_person", "person_uuid"),)

@@ -26,11 +26,12 @@ from campusid.config import get_settings
 from campusid.db import create_engine, create_session_factory
 from campusid.identity.models import Person
 from campusid.mfa import totp, webauthn
-from campusid.mfa.models import MfaFactor
+from campusid.mfa.models import MfaFactor, RecoveryCode
 from campusid.mfa.store import (
     DUPLICATE_CREDENTIAL,
     DUPLICATE_LABEL,
     NO_FACTOR,
+    NO_SUCH_CODE,
     FactorStore,
     MfaError,
 )
@@ -59,6 +60,7 @@ async def sessions(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[Asyn
 
     async with factory() as session, session.begin():
         keep = pre_existing or {uuid.UUID(int=0)}
+        await session.execute(delete(RecoveryCode).where(RecoveryCode.person_uuid.not_in(keep)))
         await session.execute(delete(MfaFactor).where(MfaFactor.person_uuid.not_in(keep)))
         await session.execute(delete(Person).where(Person.person_uuid.not_in(keep)))
 
@@ -438,6 +440,139 @@ async def test_both_kinds_count_as_different_categories(
     await _passkey(store, person, label="my key")
 
     assert await store.categories_for(person) == {"otp", "hwk"}
+
+
+# --- recovery codes ---------------------------------------------------------
+
+
+async def test_a_sheet_of_ten_is_issued(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+
+    codes = await store.issue_recovery_codes(person)
+
+    assert len(set(codes)) == 10
+    assert await store.recovery_codes_remaining(person) == 10
+
+
+async def test_a_code_can_be_redeemed_once(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+    codes = await store.issue_recovery_codes(person)
+
+    remaining = await store.redeem_recovery_code(person, codes[0])
+
+    assert remaining == 9
+    with pytest.raises(MfaError) as raised:
+        await store.redeem_recovery_code(person, codes[0])
+    assert raised.value.reason == NO_SUCH_CODE
+
+
+async def test_the_other_codes_still_work(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Single-use means that code, not the sheet."""
+    person = await _person(sessions)
+    codes = await store.issue_recovery_codes(person)
+    await store.redeem_recovery_code(person, codes[0])
+
+    assert await store.redeem_recovery_code(person, codes[1]) == 8
+
+
+async def test_a_code_typed_without_its_grouping_works(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+    codes = await store.issue_recovery_codes(person)
+
+    assert await store.redeem_recovery_code(person, codes[0].replace("-", "").lower()) == 9
+
+
+async def test_somebody_elses_code_does_not_work(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    owner = await _person(sessions)
+    stranger = await _person(sessions)
+    codes = await store.issue_recovery_codes(owner)
+
+    with pytest.raises(MfaError):
+        await store.redeem_recovery_code(stranger, codes[0])
+
+    assert await store.recovery_codes_remaining(owner) == 10
+
+
+async def test_reissuing_retires_the_old_sheet(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Leaving the old sheet valid would mean the person who printed one last
+    year and the person who printed one today can both get in, and only one of
+    them knows the other exists."""
+    person = await _person(sessions)
+    old = await store.issue_recovery_codes(person)
+    new = await store.issue_recovery_codes(person)
+
+    with pytest.raises(MfaError):
+        await store.redeem_recovery_code(person, old[0])
+    assert await store.redeem_recovery_code(person, new[0]) == 9
+
+
+async def test_reissuing_after_spending_some_restores_the_full_sheet(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+    codes = await store.issue_recovery_codes(person)
+    await store.redeem_recovery_code(person, codes[0])
+
+    await store.issue_recovery_codes(person)
+
+    assert await store.recovery_codes_remaining(person) == 10
+
+
+async def test_a_spent_code_stays_on_the_record(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """ "Which code was used and when" is the question after somebody recovers an
+    account they should not have, and a deleted row cannot answer it."""
+    person = await _person(sessions)
+    codes = await store.issue_recovery_codes(person)
+    await store.redeem_recovery_code(person, codes[0])
+
+    async with sessions() as session:
+        rows = list(
+            await session.scalars(
+                select(RecoveryCode).where(RecoveryCode.person_uuid == uuid.UUID(person))
+            )
+        )
+
+    assert len(rows) == 10
+    assert len([row for row in rows if row.used_at is not None]) == 1
+
+
+async def test_a_person_with_no_sheet_has_none_remaining(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    assert await store.recovery_codes_remaining(await _person(sessions)) == 0
+
+
+async def test_the_codes_are_not_stored_in_the_clear(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """The one credential here that gets written down, so the database is the
+    second place it can leak from."""
+    person = await _person(sessions)
+    codes = await store.issue_recovery_codes(person)
+
+    async with sessions() as session:
+        stored = list(
+            await session.scalars(
+                select(RecoveryCode.code_hash).where(RecoveryCode.person_uuid == uuid.UUID(person))
+            )
+        )
+
+    assert all(digest.startswith("$argon2id$") for digest in stored)
+    assert not any(codes[0].replace("-", "") in digest for digest in stored)
 
 
 # --- retiring ---------------------------------------------------------------

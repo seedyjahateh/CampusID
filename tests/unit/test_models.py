@@ -56,6 +56,7 @@ def test_declared_tables_match_the_migrations() -> None:
         "provisioning_dead_letter",
         "role_assignment",
         "mfa_factor",
+        "mfa_recovery_code",
     }
 
 

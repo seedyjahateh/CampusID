@@ -45,16 +45,19 @@ PWD: Final = "pwd"  # noqa: S105
 OTP: Final = "otp"
 HWK: Final = "hwk"
 PUSH: Final = "push"
+RECOVERY: Final = "recovery"
 MFA: Final = "mfa"
 
-FACTOR_CATEGORIES: Final = frozenset({PWD, OTP, HWK, PUSH})
+FACTOR_CATEGORIES: Final = frozenset({PWD, OTP, HWK, PUSH, RECOVERY})
 """What counts towards a second factor.
 
-`push` is not in RFC 8176's registry. It is emitted anyway rather than folded
-into `otp`, because a push approval is a different kind of evidence and calling
-it a one-time password would be the generous lie this module exists to avoid —
-and because the push service here is simulated, which a relying party reading an
-unfamiliar value is more likely to notice than a familiar one.
+`push` and `recovery` are not in RFC 8176's registry. They are emitted anyway
+rather than folded into `otp`, because a push approval and a printed sheet are
+different kinds of evidence and calling either a one-time password would be the
+generous lie this module exists to avoid. A relying party is also more likely to
+notice an unfamiliar value than a familiar one, which matters here: the push
+service is simulated, and a recovery code is a standing bypass of every other
+factor that a careful service may want to treat differently.
 """
 
 MAX_SPAN: Final = timedelta(hours=12)

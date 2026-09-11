@@ -51,8 +51,18 @@ UNRESOLVED = {"error": "identity_not_resolved"}
 BAD_REQUEST = {"error": "invalid_request"}
 REJECTED = {"error": "verification_failed"}
 NOT_FOUND = {"error": "not_found"}
+STEP_UP_REQUIRED = {"error": "step_up_required"}
 
 MAX_LABEL = 128
+
+RECOVERY = "recovery"
+"""The rate-limiter's name for the recovery path.
+
+Its own kind rather than sharing one, so somebody locked out of their
+authenticator app can still reach their sheet — which is what a recovery path is
+for. It is deliberately not a value the factor table accepts: recovery codes are
+not rows there, and adding it would make the table's constraint say otherwise.
+"""
 
 
 async def _caller(request: Request) -> Any:
@@ -390,7 +400,77 @@ async def step_up_webauthn(request: Request) -> Response:
     )
 
 
-async def _elevate(request: Request, session: Any, kind: str, factor: str) -> Response:
+@router.post("/challenge/recovery")
+async def step_up_recovery(request: Request) -> Response:
+    """Elevate a session with a recovery code (FR-MFA-05).
+
+    Counted and locked like any other second factor, and under its own kind, so
+    somebody locked out of their authenticator app can still reach their sheet —
+    which is what a recovery path is for.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    state = request.app.state
+    code = str((await _json(request)).get("code") or "")
+
+    try:
+        await state.mfa_limiter.check(session.person_uuid, RECOVERY)
+    except RateLimited as exc:
+        return _locked(exc)
+
+    try:
+        remaining = await state.mfa.redeem_recovery_code(session.person_uuid, code)
+    except MfaError as exc:
+        return await _failed(request, session, RECOVERY, exc.reason)
+
+    response = await _elevate(request, session, RECOVERY, "recovery", category=assurance.RECOVERY)
+    if remaining == 0:
+        log.warning("mfa.recovery.exhausted", person=session.person_uuid)
+    return response
+
+
+@router.post("/recovery")
+async def issue_recovery(request: Request) -> JSONResponse:
+    """Issue a fresh sheet of recovery codes (FR-MFA-05).
+
+    Only for a session that has already presented a second factor. A sheet is a
+    standing bypass of every other factor, so anybody who can mint one from a
+    stolen password session has defeated the whole thing — which makes this the
+    single most important authorization check in the module.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+    if not assurance.satisfies_aal2(session.amr):
+        return _refuse(STEP_UP_REQUIRED, 403)
+
+    codes = await request.app.state.mfa.issue_recovery_codes(session.person_uuid)
+    await request.app.state.audit.record(
+        EventType.MFA_RECOVERY_ISSUED,
+        Outcome.SUCCESS,
+        subject=session.person_uuid,
+        # The count, never the codes. An audit record is read by more people
+        # than a credential should be.
+        detail={"count": len(codes)},
+    )
+    return JSONResponse(
+        # Shown exactly once. There is no route that reads them back, because a
+        # sheet a stolen session can re-read is not a recovery mechanism.
+        {"codes": list(codes)},
+        status_code=201,
+        headers=NO_STORE,
+    )
+
+
+async def _elevate(
+    request: Request, session: Any, kind: str, factor: str, *, category: str | None = None
+) -> Response:
     """Raise the session's assurance and hand back a rotated cookie.
 
     The rotation is not decoration: assurance changing is a privilege change, and
@@ -403,7 +483,7 @@ async def _elevate(request: Request, session: Any, kind: str, factor: str) -> Re
 
     raised = assurance.elevated(
         methods=session.amr,
-        category=models.CATEGORY[kind],
+        category=category or models.CATEGORY[kind],
         since=session.auth_time,
         now=utcnow(),
     )

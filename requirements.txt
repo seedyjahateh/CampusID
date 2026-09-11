@@ -33,6 +33,18 @@ httpx==0.28.1
 # make for an integration that does one search per login.
 ldap3==2.9.1
 
+# --- Second factors (M4) ---------------------------------------------------
+# Recovery codes are hashed with Argon2id (FR-MFA-05). Not hand-rolled and not
+# substituted: a memory-hard function is the one primitive here whose parameters
+# are a security decision rather than an implementation, and getting them wrong
+# is invisible until somebody has the database.
+#
+# It is cffi rather than pure Python, which ADR-003 avoided for signxml. The
+# difference is that argon2-cffi publishes manylinux and aarch64 wheels, so the
+# image still builds on both architectures with no compiler — the property that
+# decision was protecting, rather than the absence of C.
+argon2-cffi==23.1.0
+
 # --- OIDC and policy (M2) --------------------------------------------------
 # Attribute release policy is declarative YAML (FR-ARP-01). Loaded with
 # `safe_load` only — `yaml.load` constructs arbitrary Python objects, which

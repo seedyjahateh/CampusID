@@ -110,6 +110,7 @@ class EventType(StrEnum):
     MFA_ENROLMENT_FAILED = "mfa.enrolment_failed"
     MFA_FACTOR_REMOVED = "mfa.factor_removed"
     MFA_STEP_UP = "mfa.step_up"
+    MFA_RECOVERY_ISSUED = "mfa.recovery_issued"
     MFA_FAILED = "mfa.failed"
     MFA_LOCKED_OUT = "mfa.locked_out"
     """The lockout is its own event rather than a flag on the failure, and it is

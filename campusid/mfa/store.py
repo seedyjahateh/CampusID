@@ -32,14 +32,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from campusid.logging import get_logger
-from campusid.mfa import totp, webauthn
-from campusid.mfa.models import CATEGORY, TOTP, WEBAUTHN, MfaFactor
+from campusid.mfa import recovery, totp, webauthn
+from campusid.mfa.models import CATEGORY, TOTP, WEBAUTHN, MfaFactor, RecoveryCode
 
 log = get_logger(__name__)
 
 NO_FACTOR = "mfa.no_such_factor"
 DUPLICATE_LABEL = "mfa.duplicate_label"
 DUPLICATE_CREDENTIAL = "mfa.credential_already_registered"
+NO_SUCH_CODE = "mfa.no_such_recovery_code"
+CODE_SPENT = "mfa.recovery_code_spent"
 
 
 class MfaError(Exception):
@@ -275,6 +277,94 @@ class FactorStore:
         async with self._sessions() as session:
             rows = await self._confirmed(session, person_uuid, WEBAUTHN)
             return [row.credential_id for row in rows if row.credential_id is not None]
+
+    # --- recovery codes ---------------------------------------------------
+
+    async def issue_recovery_codes(
+        self, person_uuid: str, *, at: datetime | None = None
+    ) -> tuple[str, ...]:
+        """Replace the person's sheet and return the new codes once (FR-MFA-05).
+
+        Replacing rather than adding: leaving the old sheet valid would mean the
+        person who printed one last year and the person who printed one today
+        can both get in, and only one of them knows the other exists.
+
+        The caller is responsible for insisting on a second factor first. That
+        check lives in the route because it is about the session, and putting it
+        here would make it unreachable to a future administrative reissue that
+        legitimately has no session at all.
+        """
+        now = at or datetime.now(UTC)
+        codes = recovery.generate()
+        hashes = [await recovery.hash_code(code) for code in codes]
+
+        async with self._sessions() as session, session.begin():
+            await session.execute(
+                update(RecoveryCode)
+                .where(
+                    RecoveryCode.person_uuid == uuid.UUID(person_uuid),
+                    RecoveryCode.used_at.is_(None),
+                    RecoveryCode.superseded_at.is_(None),
+                )
+                .values(superseded_at=now)
+            )
+            session.add_all(
+                RecoveryCode(person_uuid=uuid.UUID(person_uuid), code_hash=digest)
+                for digest in hashes
+            )
+
+        log.info("mfa.recovery.issued", person=person_uuid, count=len(codes))
+        return codes
+
+    async def redeem_recovery_code(
+        self, person_uuid: str, code: str, *, at: datetime | None = None
+    ) -> int:
+        """Spend one code, returning how many remain.
+
+        Every live code is tried, because there is no lookup key — a lookup key
+        on a credential is a value an attacker can enumerate against. Ten Argon2
+        verifications is the cost of that, on a path used once a year.
+
+        The spend is conditional on the row still being unused, so two requests
+        carrying one code resolve to one winner rather than two.
+        """
+        now = at or datetime.now(UTC)
+        async with self._sessions() as session, session.begin():
+            live = list(
+                await session.scalars(
+                    select(RecoveryCode).where(
+                        RecoveryCode.person_uuid == uuid.UUID(person_uuid),
+                        RecoveryCode.used_at.is_(None),
+                        RecoveryCode.superseded_at.is_(None),
+                    )
+                )
+            )
+            for candidate in live:
+                if not await recovery.matches(candidate.code_hash, code):
+                    continue
+                spent: Any = await session.execute(
+                    update(RecoveryCode)
+                    .where(RecoveryCode.id == candidate.id, RecoveryCode.used_at.is_(None))
+                    .values(used_at=now)
+                )
+                if not spent.rowcount:
+                    raise MfaError(CODE_SPENT)
+                log.info("mfa.recovery.redeemed", person=person_uuid, remaining=len(live) - 1)
+                return len(live) - 1
+
+        raise MfaError(NO_SUCH_CODE)
+
+    async def recovery_codes_remaining(self, person_uuid: str) -> int:
+        """How many are left, so the person can be told to reissue."""
+        async with self._sessions() as session:
+            rows = await session.scalars(
+                select(RecoveryCode.id).where(
+                    RecoveryCode.person_uuid == uuid.UUID(person_uuid),
+                    RecoveryCode.used_at.is_(None),
+                    RecoveryCode.superseded_at.is_(None),
+                )
+            )
+            return len(list(rows))
 
     # --- questions other requirements ask ---------------------------------
 

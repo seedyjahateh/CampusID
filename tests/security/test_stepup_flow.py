@@ -28,10 +28,10 @@ from httpx import ASGITransport, AsyncClient
 from campusid.audit.events import EventType
 from campusid.authz.engine import AAL1, AAL2
 from campusid.mfa import totp, webauthn
-from campusid.mfa.assurance import HWK, MFA, OTP, PWD, satisfies_aal2
+from campusid.mfa.assurance import HWK, MFA, OTP, PWD, RECOVERY, satisfies_aal2
 from campusid.mfa.challenges import ChallengeStore
 from campusid.mfa.ratelimit import THRESHOLD, AttemptLimiter
-from campusid.mfa.store import NO_FACTOR, MfaError
+from campusid.mfa.store import NO_FACTOR, NO_SUCH_CODE, MfaError
 from campusid.session.cookies import SESSION_COOKIE
 from campusid.session.store import Session, SessionStore
 from tests.support.audit import RecordingAuditLog
@@ -54,8 +54,10 @@ class _Factors:
         self.credentials: list[bytes] = []
         self.totp_raises: Exception | None = None
         self.webauthn_raises: Exception | None = None
+        self.recovery_raises: Exception | None = None
         self.verified: list[str] = []
         self.assertions: list[dict[str, Any]] = []
+        self.issued: list[str] = []
 
     async def categories_for(self, person_uuid: str) -> set[str]:
         return set(self.categories)
@@ -76,6 +78,15 @@ class _Factors:
         return webauthn.Assertion(
             credential_id=kwargs["credential_id"], sign_count=1, user_verified=True
         )
+
+    async def redeem_recovery_code(self, person_uuid: str, code: str) -> int:
+        if self.recovery_raises is not None:
+            raise self.recovery_raises
+        return 9
+
+    async def issue_recovery_codes(self, person_uuid: str) -> tuple[str, ...]:
+        self.issued.append(person_uuid)
+        return tuple(f"CODE-{n:04d}" for n in range(10))
 
 
 class _Decisions:
@@ -485,6 +496,156 @@ async def test_a_passkey_response_missing_a_field_is_refused(
     response = await http.post("/mfa/challenge/webauthn", json=body, cookies=_cookie(session))
 
     assert response.status_code == 400
+
+
+# --- recovery codes ---------------------------------------------------------
+
+
+async def test_a_recovery_code_elevates_the_session(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    """A printed sheet is a second factor. Refusing to let it reach AAL2 would
+    make the recovery path useless for the thing people need to recover."""
+    session = await _session(wired)
+
+    response = await http.post(
+        "/mfa/challenge/recovery", json={"code": "ABCD-EFGH"}, cookies=_cookie(session)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["acr"] == AAL2
+    assert RECOVERY in response.json()["amr"]
+
+
+async def test_a_recovery_code_is_named_as_itself_in_the_claims(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    """Not folded into `otp`. A careful relying party may want to treat a
+    standing bypass of every other factor differently."""
+    session = await _session(wired)
+
+    amr = (
+        await http.post(
+            "/mfa/challenge/recovery", json={"code": "ABCD-EFGH"}, cookies=_cookie(session)
+        )
+    ).json()["amr"]
+
+    assert OTP not in amr
+
+
+async def test_an_unknown_recovery_code_does_not_elevate(
+    http: AsyncClient, wired: FastAPI, factors: _Factors, audit: RecordingAuditLog
+) -> None:
+    session = await _session(wired)
+    factors.recovery_raises = MfaError(NO_SUCH_CODE)
+
+    response = await http.post(
+        "/mfa/challenge/recovery", json={"code": "ZZZZ-ZZZZ"}, cookies=_cookie(session)
+    )
+
+    assert response.status_code == 400
+    assert EventType.MFA_FAILED in audit.types
+
+
+async def test_the_recovery_path_has_its_own_lock(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    """Somebody locked out of their authenticator app must still be able to
+    reach their sheet, which is what a recovery path is for."""
+    session = await _session(wired)
+    factors.totp_raises = totp.TotpRejected(totp.MISMATCH)
+    for _ in range(THRESHOLD):
+        await http.post("/mfa/challenge/totp", json={"code": "000000"}, cookies=_cookie(session))
+
+    response = await http.post(
+        "/mfa/challenge/recovery", json={"code": "ABCD-EFGH"}, cookies=_cookie(session)
+    )
+
+    assert response.status_code == 200
+
+
+async def test_guessing_recovery_codes_locks_too(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    session = await _session(wired)
+    factors.recovery_raises = MfaError(NO_SUCH_CODE)
+
+    for _ in range(THRESHOLD):
+        response = await http.post(
+            "/mfa/challenge/recovery", json={"code": "ZZZZ-ZZZZ"}, cookies=_cookie(session)
+        )
+
+    assert response.status_code == 429
+
+
+# --- issuing a sheet --------------------------------------------------------
+
+
+async def test_a_single_factor_session_cannot_mint_a_sheet(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    """The single most important authorization check in the module. A sheet is a
+    standing bypass of every other factor, so anybody who can mint one from a
+    stolen password session has defeated the whole thing."""
+    session = await _session(wired, amr=(PWD,))
+
+    response = await http.post("/mfa/recovery", cookies=_cookie(session))
+
+    assert response.status_code == 403
+
+
+async def test_a_stepped_up_session_can(
+    http: AsyncClient, wired: FastAPI, audit: RecordingAuditLog
+) -> None:
+    session = await _session(wired, amr=(PWD, OTP, MFA))
+
+    response = await http.post("/mfa/recovery", cookies=_cookie(session))
+
+    assert response.status_code == 201
+    assert len(response.json()["codes"]) == 10
+    assert EventType.MFA_RECOVERY_ISSUED in audit.types
+
+
+async def test_a_session_claiming_mfa_without_the_methods_cannot(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    """The check is against the methods, not against the marker. A stored `amr`
+    carrying `mfa` and one factor is the shape of a bug upstream, and this route
+    must not be the place it becomes a credential."""
+    session = await _session(wired, amr=(PWD, MFA))
+
+    assert (await http.post("/mfa/recovery", cookies=_cookie(session))).status_code == 403
+
+
+async def test_the_audit_record_does_not_carry_the_codes(
+    http: AsyncClient, wired: FastAPI, audit: RecordingAuditLog
+) -> None:
+    """An audit record is read by more people than a credential should be."""
+    session = await _session(wired, amr=(PWD, OTP, MFA))
+
+    codes = (await http.post("/mfa/recovery", cookies=_cookie(session))).json()["codes"]
+
+    recorded = audit.of_type(EventType.MFA_RECOVERY_ISSUED)[0]
+    assert codes[0] not in str(recorded.detail)
+    assert recorded.detail["count"] == 10
+
+
+async def test_a_sheet_is_not_cacheable(http: AsyncClient, wired: FastAPI) -> None:
+    session = await _session(wired, amr=(PWD, HWK, MFA))
+
+    response = await http.post("/mfa/recovery", cookies=_cookie(session))
+
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_issuing_needs_a_session(http: AsyncClient) -> None:
+    assert (await http.post("/mfa/recovery")).status_code == 401
+
+
+async def test_issuing_needs_a_resolved_person(http: AsyncClient, wired: FastAPI) -> None:
+    session = await _session(wired, person=None, amr=(PWD, OTP, MFA))
+
+    assert (await http.post("/mfa/recovery", cookies=_cookie(session))).status_code == 409
 
 
 # --- rate limiting ----------------------------------------------------------
