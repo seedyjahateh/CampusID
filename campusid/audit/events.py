@@ -109,6 +109,12 @@ class EventType(StrEnum):
     MFA_ENROLLED = "mfa.enrolled"
     MFA_ENROLMENT_FAILED = "mfa.enrolment_failed"
     MFA_FACTOR_REMOVED = "mfa.factor_removed"
+    MFA_STEP_UP = "mfa.step_up"
+    MFA_FAILED = "mfa.failed"
+    MFA_LOCKED_OUT = "mfa.locked_out"
+    """The lockout is its own event rather than a flag on the failure, and it is
+    recorded once — on the attempt that crossed the line — so an alert on it
+    fires per lockout rather than per attempt behind the lock (FR-MFA-06)."""
     """Four events for two outcomes, because a started enrolment that never
     finishes is the shape of somebody scanning a QR code into the wrong app, and
     it is invisible if only the finished ones are recorded."""

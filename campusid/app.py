@@ -36,6 +36,7 @@ from campusid.lifecycle.sweeper import GraceSweeper
 from campusid.lifecycle.targets import LdapTarget
 from campusid.logging import configure_logging, get_logger
 from campusid.mfa.challenges import ChallengeStore
+from campusid.mfa.ratelimit import AttemptLimiter
 from campusid.mfa.store import FactorStore
 from campusid.middleware import (
     BodySizeLimitMiddleware,
@@ -149,6 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.decider = CachingDecider(app.state.authorization, app.state.decision_cache)
     app.state.mfa = FactorStore(session_factory, issuer=settings.service_name)
     app.state.mfa_challenges = ChallengeStore(redis)
+    app.state.mfa_limiter = AttemptLimiter(redis)
     app.state.lifecycle = LifecycleStore(session_factory)
     app.state.identity = IdentityRegistry(session_factory, scope=settings.scope)
     app.state.audit = AuditLog(session_factory)

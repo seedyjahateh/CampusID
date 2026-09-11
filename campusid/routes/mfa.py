@@ -30,12 +30,15 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from campusid.audit.events import EventType, Outcome
 from campusid.logging import get_logger
-from campusid.mfa import challenges, totp, webauthn
+from campusid.mfa import assurance, challenges, models, ratelimit, totp, webauthn
+from campusid.mfa.ratelimit import LOCKED, RateLimited
 from campusid.mfa.store import DUPLICATE_LABEL, MfaError
-from campusid.session.cookies import SESSION_COOKIE
+from campusid.saml.stores import utcnow
+from campusid.session.cookies import SESSION_COOKIE, set_session_cookie
 
 log = get_logger(__name__)
 
@@ -271,6 +274,206 @@ async def register_webauthn(request: Request) -> JSONResponse:
         status_code=201,
         headers=NO_STORE,
     )
+
+
+# --- step-up ----------------------------------------------------------------
+
+
+@router.post("/challenge")
+async def challenge(request: Request) -> JSONResponse:
+    """Start a step-up: say what the caller can present, and issue a challenge.
+
+    Answered for any authenticated session rather than only for one that needs
+    elevating, because the alternative is an endpoint whose 200 or 409 tells a
+    caller whether the person holds a second factor.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    state = request.app.state
+    categories = await state.mfa.categories_for(session.person_uuid)
+    credentials = await state.mfa.credential_ids(session.person_uuid)
+
+    body: dict[str, Any] = {
+        "acr": session.acr,
+        "amr": list(session.amr),
+        "factors": sorted(categories),
+    }
+    if credentials:
+        body["webauthn"] = {
+            "challenge": webauthn.b64url(
+                await state.mfa_challenges.issue(session.person_uuid, challenges.AUTHENTICATE)
+            ),
+            "rpId": state.settings.webauthn_rp_id,
+            "allowCredentials": [
+                {"type": "public-key", "id": webauthn.b64url(cid)} for cid in credentials
+            ],
+            "userVerification": "preferred",
+            "timeout": int(challenges.TTL.total_seconds() * 1000),
+        }
+    return JSONResponse(body, headers=NO_STORE)
+
+
+@router.post("/challenge/totp")
+async def step_up_totp(request: Request) -> Response:
+    """Elevate a session with a one-time code (FR-MFA-04)."""
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    state = request.app.state
+    code = str((await _json(request)).get("code") or "")
+
+    try:
+        await state.mfa_limiter.check(session.person_uuid, models.TOTP)
+    except RateLimited as exc:
+        return _locked(exc)
+
+    try:
+        factor_id = await state.mfa.verify_totp(session.person_uuid, code)
+    except totp.TotpRejected as exc:
+        return await _failed(request, session, models.TOTP, exc.reason)
+
+    return await _elevate(request, session, models.TOTP, factor_id)
+
+
+@router.post("/challenge/webauthn")
+async def step_up_webauthn(request: Request) -> Response:
+    """Elevate a session with a passkey (FR-MFA-04)."""
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    state = request.app.state
+    body = await _json(request)
+    credential_id = _b64url(body.get("id"))
+    client_data = _b64url(body.get("clientDataJSON"))
+    authenticator_data = _b64url(body.get("authenticatorData"))
+    signature = _b64url(body.get("signature"))
+    if None in (credential_id, client_data, authenticator_data, signature):
+        return _refuse(BAD_REQUEST, 400)
+
+    try:
+        await state.mfa_limiter.check(session.person_uuid, models.WEBAUTHN)
+    except RateLimited as exc:
+        return _locked(exc)
+
+    outstanding = await state.mfa_challenges.consume(session.person_uuid, challenges.AUTHENTICATE)
+    if outstanding is None:
+        return await _failed(request, session, models.WEBAUTHN, "mfa.no_outstanding_challenge")
+
+    try:
+        assertion = await state.mfa.verify_webauthn(
+            session.person_uuid,
+            credential_id=credential_id,
+            client_data=client_data,
+            authenticator_data=authenticator_data,
+            signature=signature,
+            challenge=outstanding,
+            origin=state.settings.webauthn_origin,
+            rp_id=state.settings.webauthn_rp_id,
+        )
+    except webauthn.WebAuthnRejected as exc:
+        return await _failed(request, session, models.WEBAUTHN, exc.reason)
+    except MfaError as exc:
+        return await _failed(request, session, models.WEBAUTHN, exc.reason)
+
+    return await _elevate(
+        request, session, models.WEBAUTHN, str(assertion.credential_id.hex()[:16])
+    )
+
+
+async def _elevate(request: Request, session: Any, kind: str, factor: str) -> Response:
+    """Raise the session's assurance and hand back a rotated cookie.
+
+    The rotation is not decoration: assurance changing is a privilege change, and
+    reusing the identifier across it would let a session captured at AAL1 be
+    replayed at AAL2. The cookie is therefore reissued on the way out, which is
+    also why this returns a `Response` rather than a body.
+    """
+    state = request.app.state
+    await state.mfa_limiter.record_success(session.person_uuid, kind)
+
+    raised = assurance.elevated(
+        methods=session.amr,
+        category=models.CATEGORY[kind],
+        since=session.auth_time,
+        now=utcnow(),
+    )
+    elevated = await state.sessions.elevate(session.sid, acr=raised.acr, amr=raised.amr)
+    if elevated is None:  # pragma: no cover - the session was loaded a moment ago
+        return _refuse(UNAUTHENTICATED, 401)
+
+    # Every decision cached about this person was made against the old
+    # assurance, including the challenge that sent them here (FR-AZ-08).
+    await _invalidate(state, session.person_uuid)
+
+    await state.audit.record(
+        EventType.MFA_STEP_UP,
+        Outcome.SUCCESS,
+        subject=session.person_uuid,
+        detail={"kind": kind, "factor": factor, "acr": raised.acr, "amr": list(raised.amr)},
+    )
+    response = JSONResponse(
+        {"acr": raised.acr, "amr": list(raised.amr), "auth_time": raised.auth_time.isoformat()},
+        headers=NO_STORE,
+    )
+    set_session_cookie(response, elevated.sid)
+    return response
+
+
+async def _failed(request: Request, session: Any, kind: str, reason: str) -> Response:
+    """Count the failure, audit it, and say nothing useful about why."""
+    state = request.app.state
+    try:
+        outcome = await state.mfa_limiter.record_failure(session.person_uuid, kind)
+    except RateLimited as exc:
+        return _locked(exc)
+
+    await state.audit.record(
+        EventType.MFA_FAILED,
+        Outcome.FAILURE,
+        subject=session.person_uuid,
+        detail={"kind": kind, "reason": reason, "attempts": outcome.attempts},
+    )
+    if outcome.locked:
+        # Recorded separately and once, on the attempt that crossed the line, so
+        # an alert on this event fires per lockout rather than per attempt.
+        await state.audit.record(
+            EventType.MFA_LOCKED_OUT,
+            Outcome.DENIED,
+            subject=session.person_uuid,
+            detail={"kind": kind, "attempts": outcome.attempts},
+        )
+        return _locked(RateLimited(LOCKED, int(ratelimit.LOCKOUT.total_seconds())))
+    return _refuse(REJECTED, 400)
+
+
+def _locked(exc: RateLimited) -> Response:
+    """Refuse an attempt that was never made.
+
+    `Retry-After` is a real header for a real wait: somebody locked out needs to
+    know whether to wait or to call the service desk, and an attacker already
+    knows they are being refused.
+    """
+    return JSONResponse(
+        {"error": exc.reason, "retry_after": exc.retry_after},
+        status_code=429,
+        headers={**NO_STORE, "Retry-After": str(exc.retry_after)},
+    )
+
+
+async def _invalidate(state: Any, person_uuid: str) -> None:
+    cache = getattr(state, "decision_cache", None)
+    if cache is not None:
+        await cache.invalidate(person_uuid)
 
 
 @router.get("/factors")
