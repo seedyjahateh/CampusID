@@ -12,6 +12,7 @@ the request tries to say who it is.
 
 from __future__ import annotations
 
+import base64
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,7 +24,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from campusid.audit.events import EventType
-from campusid.mfa import totp
+from campusid.mfa import totp, webauthn
+from campusid.mfa.challenges import ChallengeStore
 from campusid.mfa.store import DUPLICATE_LABEL, NO_FACTOR, Enrolment, MfaError
 from campusid.session.cookies import SESSION_COOKIE
 from campusid.session.store import Session, SessionStore
@@ -55,6 +57,8 @@ class _Factors:
         self.begun: list[tuple[str, str, str]] = []
         self.confirmed: list[tuple[str, uuid.UUID, str]] = []
         self.disabled: list[tuple[str, uuid.UUID]] = []
+        self.credentials: list[bytes] = []
+        self.registered: list[tuple[str, dict[str, Any]]] = []
         self.raises: Exception | None = None
 
     async def begin_totp(self, person_uuid: str, *, label: str, account: str) -> Enrolment:
@@ -80,6 +84,15 @@ class _Factors:
             raise self.raises
         self.disabled.append((person_uuid, factor_id))
 
+    async def credential_ids(self, person_uuid: str) -> list[bytes]:
+        return list(self.credentials)
+
+    async def register_webauthn(self, person_uuid: str, **kwargs: Any) -> uuid.UUID:
+        if self.raises is not None:
+            raise self.raises
+        self.registered.append((person_uuid, kwargs))
+        return FACTOR
+
 
 @pytest.fixture
 def redis() -> aioredis.FakeRedis:
@@ -103,6 +116,7 @@ def wired(
     app.state.redis = redis
     app.state.sessions = SessionStore(redis)
     app.state.mfa = factors
+    app.state.mfa_challenges = ChallengeStore(redis)
     app.state.audit = audit
     return app
 
@@ -126,6 +140,14 @@ async def _session(wired: FastAPI, *, person: str | None = PERSON) -> Session:
 
 def _cookie(session: Session) -> dict[str, str]:
     return {SESSION_COOKIE: session.sid}
+
+
+def _encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 # --- who the caller is ------------------------------------------------------
@@ -336,6 +358,181 @@ async def test_confirmation_needs_a_resolved_person(http: AsyncClient, wired: Fa
     )
 
     assert response.status_code == 409
+
+
+# --- WebAuthn ---------------------------------------------------------------
+
+
+async def test_the_options_carry_a_fresh_challenge(http: AsyncClient, wired: FastAPI) -> None:
+    session = await _session(wired)
+
+    first = (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).json()
+    second = (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).json()
+
+    assert first["challenge"] != second["challenge"]
+
+
+async def test_the_options_name_only_algorithms_the_broker_can_verify(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    """Offering one the verifier would refuse means an enrolment that completes
+    in the browser and is rejected here, with nothing useful to say."""
+    session = await _session(wired)
+
+    body = (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).json()
+
+    assert [p["alg"] for p in body["pubKeyCredParams"]] == list(webauthn.SUPPORTED_ALGORITHMS)
+
+
+async def test_the_user_handle_carries_nothing_but_the_person_id(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    """A handle with a name or an address in it puts that on the authenticator,
+    where the person cannot later take it back."""
+    session = await _session(wired)
+
+    body = (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).json()
+
+    assert _decode(body["user"]["id"]) == PERSON.encode("utf-8")
+
+
+async def test_the_options_exclude_credentials_already_registered(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    """So an authenticator already enrolled here declines rather than producing
+    a second credential the person cannot tell apart from the first."""
+    session = await _session(wired)
+    factors.credentials = [b"already-here"]
+
+    body = (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).json()
+
+    assert [_decode(c["id"]) for c in body["excludeCredentials"]] == [b"already-here"]
+
+
+async def test_options_need_a_session(http: AsyncClient) -> None:
+    assert (await http.post("/mfa/webauthn/options")).status_code == 401
+
+
+async def test_options_need_a_resolved_person(http: AsyncClient, wired: FastAPI) -> None:
+    session = await _session(wired, person=None)
+
+    assert (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).status_code == 409
+
+
+async def test_a_credential_registers_against_the_issued_challenge(
+    http: AsyncClient, wired: FastAPI, factors: _Factors, audit: RecordingAuditLog
+) -> None:
+    session = await _session(wired)
+    issued = (await http.post("/mfa/webauthn/options", cookies=_cookie(session))).json()
+
+    response = await http.post(
+        "/mfa/webauthn",
+        json={
+            "label": "my key",
+            "clientDataJSON": _encode(b"{}"),
+            "attestationObject": _encode(b"attestation"),
+        },
+        cookies=_cookie(session),
+    )
+
+    assert response.status_code == 201
+    person, passed = factors.registered[0]
+    assert person == PERSON
+    assert passed["challenge"] == _decode(issued["challenge"])
+    assert EventType.MFA_ENROLLED in audit.types
+
+
+async def test_a_challenge_is_spent_once(
+    http: AsyncClient, wired: FastAPI, factors: _Factors
+) -> None:
+    """Otherwise a captured ceremony response is good for as long as the
+    challenge lives, which is the whole thing a challenge exists to prevent."""
+    session = await _session(wired)
+    await http.post("/mfa/webauthn/options", cookies=_cookie(session))
+    body = {
+        "label": "my key",
+        "clientDataJSON": _encode(b"{}"),
+        "attestationObject": _encode(b"attestation"),
+    }
+    await http.post("/mfa/webauthn", json=body, cookies=_cookie(session))
+
+    second = await http.post(
+        "/mfa/webauthn", json={**body, "label": "again"}, cookies=_cookie(session)
+    )
+
+    assert second.status_code == 400
+
+
+async def test_registering_with_no_outstanding_challenge_is_refused(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    session = await _session(wired)
+
+    response = await http.post(
+        "/mfa/webauthn",
+        json={
+            "label": "my key",
+            "clientDataJSON": _encode(b"{}"),
+            "attestationObject": _encode(b"attestation"),
+        },
+        cookies=_cookie(session),
+    )
+
+    assert response.status_code == 400
+
+
+async def test_a_rejected_ceremony_is_audited_with_its_reason(
+    http: AsyncClient, wired: FastAPI, factors: _Factors, audit: RecordingAuditLog
+) -> None:
+    session = await _session(wired)
+    await http.post("/mfa/webauthn/options", cookies=_cookie(session))
+    factors.raises = webauthn.WebAuthnRejected(webauthn.ORIGIN_MISMATCH)
+
+    response = await http.post(
+        "/mfa/webauthn",
+        json={
+            "label": "my key",
+            "clientDataJSON": _encode(b"{}"),
+            "attestationObject": _encode(b"attestation"),
+        },
+        cookies=_cookie(session),
+    )
+
+    assert response.status_code == 400
+    failures = audit.of_type(EventType.MFA_ENROLMENT_FAILED)
+    assert [event.detail["reason"] for event in failures] == [webauthn.ORIGIN_MISMATCH]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"label": "my key", "attestationObject": "YQ"},
+        {"label": "my key", "clientDataJSON": "YQ"},
+        {"clientDataJSON": "YQ", "attestationObject": "YQ"},
+        {"label": "my key", "clientDataJSON": "!!!!", "attestationObject": "YQ"},
+    ],
+)
+async def test_a_registration_missing_a_field_is_refused(
+    http: AsyncClient, wired: FastAPI, body: dict[str, Any]
+) -> None:
+    session = await _session(wired)
+    await http.post("/mfa/webauthn/options", cookies=_cookie(session))
+
+    assert (await http.post("/mfa/webauthn", json=body, cookies=_cookie(session))).status_code == (
+        400
+    )
+
+
+async def test_webauthn_registration_needs_a_session(http: AsyncClient) -> None:
+    assert (await http.post("/mfa/webauthn", json={})).status_code == 401
+
+
+async def test_webauthn_registration_needs_a_resolved_person(
+    http: AsyncClient, wired: FastAPI
+) -> None:
+    session = await _session(wired, person=None)
+
+    assert (await http.post("/mfa/webauthn", json={}, cookies=_cookie(session))).status_code == 409
 
 
 # --- listing ----------------------------------------------------------------

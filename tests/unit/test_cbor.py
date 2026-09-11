@@ -17,7 +17,6 @@ import pytest
 from campusid.mfa.cbor import MAX_DEPTH, CborError, decode, decode_prefix
 from tests.support.authenticator import encode
 
-
 # --- RFC 8949 appendix A ----------------------------------------------------
 
 

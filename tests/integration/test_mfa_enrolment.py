@@ -12,9 +12,11 @@ What is here is what the arithmetic cannot know on its own.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import delete, select
@@ -23,9 +25,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from campusid.config import get_settings
 from campusid.db import create_engine, create_session_factory
 from campusid.identity.models import Person
-from campusid.mfa import totp
+from campusid.mfa import totp, webauthn
 from campusid.mfa.models import MfaFactor
-from campusid.mfa.store import DUPLICATE_LABEL, NO_FACTOR, FactorStore, MfaError
+from campusid.mfa.store import (
+    DUPLICATE_CREDENTIAL,
+    DUPLICATE_LABEL,
+    NO_FACTOR,
+    FactorStore,
+    MfaError,
+)
+from tests.support.authenticator import VirtualAuthenticator
 
 pytestmark = pytest.mark.integration
 
@@ -265,6 +274,170 @@ async def test_a_person_with_no_factor_is_told_the_code_is_wrong(
         await store.verify_totp(person, "000000", at=NOW)
 
     assert raised.value.reason == totp.MISMATCH
+
+
+# --- WebAuthn ---------------------------------------------------------------
+
+ORIGIN = "https://broker.campus.test"
+RP_ID = "broker.campus.test"
+
+
+async def _passkey(
+    store: FactorStore, person: str, *, label: str = "my key"
+) -> tuple[VirtualAuthenticator, uuid.UUID]:
+    authenticator = VirtualAuthenticator()
+    challenge = os.urandom(32)
+    client_data, attestation = authenticator.register(
+        challenge=challenge, origin=ORIGIN, rp_id=RP_ID
+    )
+    factor_id = await store.register_webauthn(
+        person,
+        label=label,
+        client_data=client_data,
+        attestation_object=attestation,
+        challenge=challenge,
+        origin=ORIGIN,
+        rp_id=RP_ID,
+    )
+    return authenticator, factor_id
+
+
+async def _assert(
+    store: FactorStore, person: str, authenticator: VirtualAuthenticator, **overrides: Any
+) -> webauthn.Assertion:
+    challenge = os.urandom(32)
+    client_data, data, signature = authenticator.assert_(
+        challenge=challenge, origin=ORIGIN, rp_id=RP_ID, **overrides
+    )
+    return await store.verify_webauthn(
+        person,
+        credential_id=authenticator.credential_id,
+        client_data=client_data,
+        authenticator_data=data,
+        signature=signature,
+        challenge=challenge,
+        origin=ORIGIN,
+        rp_id=RP_ID,
+    )
+
+
+async def test_a_passkey_registers_confirmed(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """One step rather than two. The response already carries a signature over a
+    challenge we issued, so the ceremony is the proof and a second round trip
+    would establish nothing."""
+    person = await _person(sessions)
+
+    await _passkey(store, person)
+
+    assert await store.categories_for(person) == {"hwk"}
+
+
+async def test_a_registered_passkey_asserts(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+    authenticator, factor_id = await _passkey(store, person)
+
+    assertion = await _assert(store, person, authenticator)
+
+    assert assertion is not None
+    assert (await store.credential_ids(person)) == [authenticator.credential_id]
+
+
+async def test_the_counter_moves_forward_across_assertions(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """The stored counter is what the next assertion is compared against, so a
+    store that never wrote it back would detect nothing."""
+    person = await _person(sessions)
+    authenticator, _ = await _passkey(store, person)
+    await _assert(store, person, authenticator)
+
+    await _assert(store, person, authenticator)
+
+    factor = next(f for f in await store.factors_for(person) if f.kind == "webauthn")
+    assert factor.sign_count == 2
+
+
+async def test_a_replayed_counter_is_refused(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+    authenticator, _ = await _passkey(store, person)
+    await _assert(store, person, authenticator)
+
+    with pytest.raises(webauthn.WebAuthnRejected) as raised:
+        await _assert(store, person, authenticator, sign_count=1)
+
+    assert raised.value.reason == webauthn.CLONED
+
+
+async def test_somebody_elses_credential_is_not_found(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Looked up by credential *and* person. By credential alone the signature
+    would verify against the owner's public key, and the result would be an
+    authentication as the wrong person."""
+    owner = await _person(sessions)
+    stranger = await _person(sessions)
+    authenticator, _ = await _passkey(store, owner)
+
+    with pytest.raises(MfaError) as raised:
+        await _assert(store, stranger, authenticator)
+
+    assert raised.value.reason == NO_FACTOR
+
+
+async def test_one_credential_cannot_be_registered_twice(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Across everybody, not per person. A collision means one credential was
+    presented for two people."""
+    owner = await _person(sessions)
+    stranger = await _person(sessions)
+    authenticator, _ = await _passkey(store, owner)
+    challenge = os.urandom(32)
+    client_data, attestation = authenticator.register(
+        challenge=challenge, origin=ORIGIN, rp_id=RP_ID
+    )
+
+    with pytest.raises(MfaError) as raised:
+        await store.register_webauthn(
+            stranger,
+            label="stolen",
+            client_data=client_data,
+            attestation_object=attestation,
+            challenge=challenge,
+            origin=ORIGIN,
+            rp_id=RP_ID,
+        )
+
+    assert raised.value.reason == DUPLICATE_CREDENTIAL
+
+
+async def test_a_disabled_passkey_no_longer_asserts(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    person = await _person(sessions)
+    authenticator, factor_id = await _passkey(store, person)
+    await store.disable(person, factor_id)
+
+    with pytest.raises(MfaError):
+        await _assert(store, person, authenticator)
+
+
+async def test_both_kinds_count_as_different_categories(
+    store: FactorStore, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """FR-MFA-08 turns on this: `acr` is `aal2` only when two distinct categories
+    were used, so the categories have to be distinct in the first place."""
+    person = await _person(sessions)
+    await _enrol(store, person, label="my phone")
+    await _passkey(store, person, label="my key")
+
+    assert await store.categories_for(person) == {"otp", "hwk"}
 
 
 # --- retiring ---------------------------------------------------------------

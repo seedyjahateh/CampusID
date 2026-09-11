@@ -26,7 +26,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -82,6 +93,35 @@ class MfaFactor(Base):
     window.
     """
 
+    credential_id: Mapped[bytes | None] = mapped_column(LargeBinary)
+    """The WebAuthn credential id, as the authenticator chose it (FR-MFA-02).
+
+    Unique across the whole table rather than per person. The same physical
+    authenticator registering against two accounts produces two different
+    credentials, so a collision here means the same credential was presented for
+    two people — which is either a bug or somebody trying to attach a key they
+    already control to an account they do not.
+    """
+
+    public_key: Mapped[bytes | None] = mapped_column(LargeBinary)
+    """The COSE key, in the exact bytes it arrived in.
+
+    Stored encoded rather than as parsed parameters, so a later change to the
+    parser cannot change what an existing credential means.
+    """
+
+    sign_count: Mapped[int | None] = mapped_column(BigInteger)
+    """The authenticator's counter, for clone detection (FR-MFA-02).
+
+    Distinct from `last_step` even though both are monotonic: a TOTP step is
+    derived from the clock and a sign count is chosen by the authenticator, so
+    the same column would carry two things that fail in different ways.
+    """
+
+    algorithm: Mapped[int | None] = mapped_column(Integer)
+    """The COSE algorithm, recorded so the verification path is the one chosen at
+    enrolment rather than one named by the assertion."""
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -102,8 +142,16 @@ class MfaFactor(Base):
             "kind <> 'totp' or secret is not null",
             name="ck_mfa_factor_totp_secret",
         ),
+        CheckConstraint(
+            "kind <> 'webauthn' or (credential_id is not null and public_key is not null)",
+            name="ck_mfa_factor_webauthn_material",
+        ),
         # One label per person, so "my phone" means one thing when they are
         # choosing which factor to use.
         Index("uq_mfa_factor_label", "person_uuid", "label", unique=True),
         Index("ix_mfa_factor_person", "person_uuid"),
+        # Across everybody, not per person: a credential presented for two people
+        # is either a bug or somebody attaching a key they already control to an
+        # account they do not.
+        Index("uq_mfa_factor_credential", "credential_id", unique=True),
     )

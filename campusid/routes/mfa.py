@@ -23,6 +23,8 @@ session cannot read back a factor enrolled before it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import uuid
 from typing import Any
 
@@ -31,7 +33,7 @@ from fastapi.responses import JSONResponse
 
 from campusid.audit.events import EventType, Outcome
 from campusid.logging import get_logger
-from campusid.mfa import totp
+from campusid.mfa import challenges, totp, webauthn
 from campusid.mfa.store import DUPLICATE_LABEL, MfaError
 from campusid.session.cookies import SESSION_COOKIE
 
@@ -156,6 +158,121 @@ async def confirm_totp(factor_id: str, request: Request) -> JSONResponse:
     return JSONResponse({"id": factor_id, "confirmed": True}, headers=NO_STORE)
 
 
+@router.post("/webauthn/options")
+async def webauthn_options(request: Request) -> JSONResponse:
+    """Issue a challenge and describe the credential to create (FR-MFA-02).
+
+    The options are built here rather than in the page, because every one of
+    them is a security parameter: the relying-party id the credential is scoped
+    to, the algorithms the broker can verify, and the challenge. A page that
+    chose its own would be choosing what the credential is worth.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    state = request.app.state
+    challenge = await state.mfa_challenges.issue(session.person_uuid, challenges.REGISTER)
+    existing = await state.mfa.credential_ids(session.person_uuid)
+
+    return JSONResponse(
+        {
+            "challenge": webauthn.b64url(challenge),
+            "rp": {"id": state.settings.webauthn_rp_id, "name": state.settings.service_name},
+            "user": {
+                # The user handle is the person id and nothing else. A handle
+                # carrying a name or an address would put it on the
+                # authenticator, where the person cannot later take it back.
+                "id": webauthn.b64url(session.person_uuid.encode("utf-8")),
+                "name": session.name_id,
+                "displayName": session.name_id,
+            },
+            "pubKeyCredParams": [
+                {"type": "public-key", "alg": alg} for alg in webauthn.SUPPORTED_ALGORITHMS
+            ],
+            # `none` for the reason the verifier gives: anything stronger turns a
+            # self-service enrolment into a procurement policy.
+            "attestation": "none",
+            "authenticatorSelection": {"userVerification": "preferred", "residentKey": "preferred"},
+            # So an authenticator already registered here declines rather than
+            # producing a second credential the person has no way to tell apart.
+            "excludeCredentials": [
+                {"type": "public-key", "id": webauthn.b64url(cid)} for cid in existing
+            ],
+            "timeout": int(challenges.TTL.total_seconds() * 1000),
+        },
+        headers=NO_STORE,
+    )
+
+
+@router.post("/webauthn")
+async def register_webauthn(request: Request) -> JSONResponse:
+    """Store the credential the browser just created (FR-MFA-02).
+
+    One step, unlike TOTP: the response already carries a signature over a
+    challenge this broker issued, so the ceremony is the proof and a second round
+    trip would establish nothing.
+    """
+    session = await _caller(request)
+    if session is None:
+        return _refuse(UNAUTHENTICATED, 401)
+    if session.person_uuid is None:
+        return _refuse(UNRESOLVED, 409)
+
+    body = await _json(request)
+    label = str(body.get("label") or "").strip()
+    if not label or len(label) > MAX_LABEL:
+        return _refuse(BAD_REQUEST, 400)
+
+    client_data = _b64url(body.get("clientDataJSON"))
+    attestation = _b64url(body.get("attestationObject"))
+    if client_data is None or attestation is None:
+        return _refuse(BAD_REQUEST, 400)
+
+    state = request.app.state
+    challenge = await state.mfa_challenges.consume(session.person_uuid, challenges.REGISTER)
+    if challenge is None:
+        # Expired, already spent, or never issued. One answer for all three: the
+        # remedy is the same and the difference is only useful to somebody
+        # replaying a captured response.
+        return _refuse(REJECTED, 400)
+
+    try:
+        factor_id = await state.mfa.register_webauthn(
+            session.person_uuid,
+            label=label,
+            client_data=client_data,
+            attestation_object=attestation,
+            challenge=challenge,
+            origin=state.settings.webauthn_origin,
+            rp_id=state.settings.webauthn_rp_id,
+        )
+    except webauthn.WebAuthnRejected as exc:
+        await state.audit.record(
+            EventType.MFA_ENROLMENT_FAILED,
+            Outcome.FAILURE,
+            subject=session.person_uuid,
+            detail={"kind": "webauthn", "reason": exc.reason},
+        )
+        return _refuse(REJECTED, 400)
+    except MfaError as exc:
+        return _refuse({"error": exc.reason}, 409)
+
+    await state.audit.record(
+        EventType.MFA_ENROLLED,
+        Outcome.SUCCESS,
+        subject=session.person_uuid,
+        detail={"factor": str(factor_id), "kind": "webauthn", "label": label},
+    )
+    return JSONResponse(
+        {"id": str(factor_id), "kind": "webauthn", "label": label},
+        status_code=201,
+        headers=NO_STORE,
+    )
+
+
 @router.get("/factors")
 async def factors(request: Request) -> JSONResponse:
     """What the caller has registered, without any of the material.
@@ -219,6 +336,24 @@ async def disable_factor(factor_id: str, request: Request) -> JSONResponse:
         detail={"factor": factor_id},
     )
     return JSONResponse({"id": factor_id, "disabled": True}, headers=NO_STORE)
+
+
+def _b64url(value: Any) -> bytes | None:
+    """Decode a field the browser sent as base64url, or None if it is not one.
+
+    None rather than an exception, so a malformed field is a bad request in the
+    same shape as a missing one.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        # `validate=True`, because the default silently drops characters outside
+        # the alphabet — so a field of punctuation decodes to nothing at all and
+        # arrives at the verifier as an empty ceremony rather than as a refusal.
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    return decoded or None
 
 
 async def _json(request: Request) -> dict[str, Any]:

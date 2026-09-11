@@ -41,6 +41,12 @@ x-broker-env: &broker-env
   # strangers at once, so it is backed up with the database. The broker refuses
   # to start in production while it still holds this development value.
   CAMPUSID_PAIRWISE_SALT: ${CAMPUSID_PAIRWISE_SALT:-dev-only-pairwise-salt-replace-in-production}
+  # The domain every passkey is scoped to, and the exact origin the browser will
+  # report. Two settings rather than one derived from BASE_URL: the relying-party
+  # id is a registrable domain with no scheme and no port, and changing it
+  # orphans every credential already registered.
+  CAMPUSID_WEBAUTHN_RP_ID: ${CAMPUSID_WEBAUTHN_RP_ID:-localhost}
+  CAMPUSID_WEBAUTHN_ORIGIN: ${CAMPUSID_WEBAUTHN_ORIGIN:-http://localhost:8000}
   TZ: UTC
 
 services:

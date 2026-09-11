@@ -32,13 +32,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from campusid.logging import get_logger
-from campusid.mfa import totp
-from campusid.mfa.models import CATEGORY, TOTP, MfaFactor
+from campusid.mfa import totp, webauthn
+from campusid.mfa.models import CATEGORY, TOTP, WEBAUTHN, MfaFactor
 
 log = get_logger(__name__)
 
 NO_FACTOR = "mfa.no_such_factor"
 DUPLICATE_LABEL = "mfa.duplicate_label"
+DUPLICATE_CREDENTIAL = "mfa.credential_already_registered"
 
 
 class MfaError(Exception):
@@ -161,6 +162,119 @@ class FactorStore:
         # missing factor, because which of the two it is tells somebody
         # enumerating accounts who is worth phishing.
         raise totp.TotpRejected(totp.MISMATCH)
+
+    # --- WebAuthn ---------------------------------------------------------
+
+    async def register_webauthn(
+        self,
+        person_uuid: str,
+        *,
+        label: str,
+        client_data: bytes,
+        attestation_object: bytes,
+        challenge: bytes,
+        origin: str,
+        rp_id: str,
+        at: datetime | None = None,
+    ) -> uuid.UUID:
+        """Store a credential the verifier was willing to accept (FR-MFA-02).
+
+        One step rather than the two TOTP needs. A WebAuthn registration already
+        carries a signature over a challenge we issued, so the ceremony *is* the
+        proof — there is nothing a second round trip would establish. The factor
+        is therefore confirmed the moment it is written.
+        """
+        now = at or datetime.now(UTC)
+        registration = webauthn.register(
+            client_data=client_data,
+            attestation_object=attestation_object,
+            challenge=challenge,
+            origin=origin,
+            rp_id=rp_id,
+        )
+        factor = MfaFactor(
+            person_uuid=uuid.UUID(person_uuid),
+            kind=WEBAUTHN,
+            label=label,
+            credential_id=registration.credential_id,
+            public_key=registration.public_key,
+            sign_count=registration.sign_count,
+            algorithm=registration.algorithm,
+            confirmed_at=now,
+        )
+        try:
+            async with self._sessions() as session, session.begin():
+                session.add(factor)
+        except IntegrityError as exc:
+            # Either the label index or the credential one. They are reported
+            # apart because the second is the interesting case: a credential
+            # already registered to somebody is not a naming collision.
+            reason = DUPLICATE_CREDENTIAL if "credential" in str(exc.orig) else DUPLICATE_LABEL
+            raise MfaError(reason) from exc
+
+        log.info("mfa.webauthn.registered", person=person_uuid, factor=str(factor.id))
+        return factor.id
+
+    async def verify_webauthn(
+        self,
+        person_uuid: str,
+        *,
+        credential_id: bytes,
+        client_data: bytes,
+        authenticator_data: bytes,
+        signature: bytes,
+        challenge: bytes,
+        origin: str,
+        rp_id: str,
+        at: datetime | None = None,
+    ) -> webauthn.Assertion:
+        """Check an assertion and move the credential's counter forward.
+
+        Looked up by credential id *and* person, so an assertion for a key
+        belonging to somebody else is not found rather than verified against
+        their public key — which would succeed, and would be an authentication
+        as the wrong person.
+        """
+        now = at or datetime.now(UTC)
+        async with self._sessions() as session, session.begin():
+            factor = await session.scalar(
+                select(MfaFactor).where(
+                    MfaFactor.credential_id == credential_id,
+                    MfaFactor.person_uuid == uuid.UUID(person_uuid),
+                    MfaFactor.kind == WEBAUTHN,
+                    MfaFactor.disabled_at.is_(None),
+                    MfaFactor.confirmed_at.is_not(None),
+                )
+            )
+            if factor is None or factor.public_key is None:
+                raise MfaError(NO_FACTOR)
+
+            assertion = webauthn.verify(
+                client_data=client_data,
+                authenticator_data=authenticator_data,
+                signature=signature,
+                public_key=factor.public_key,
+                credential_id=credential_id,
+                stored_sign_count=factor.sign_count or 0,
+                challenge=challenge,
+                origin=origin,
+                rp_id=rp_id,
+            )
+            factor.sign_count = assertion.sign_count
+            factor.last_used_at = now
+
+        log.info("mfa.webauthn.verified", person=person_uuid, factor=str(factor.id))
+        return assertion
+
+    async def credential_ids(self, person_uuid: str) -> list[bytes]:
+        """Which credentials to offer the browser in `allowCredentials`.
+
+        Without it a security key holding several credentials cannot tell which
+        one is wanted, and a platform authenticator will not offer one at all.
+        """
+        async with self._sessions() as session:
+            rows = await self._confirmed(session, person_uuid, WEBAUTHN)
+            return [row.credential_id for row in rows if row.credential_id is not None]
 
     # --- questions other requirements ask ---------------------------------
 

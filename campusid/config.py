@@ -109,6 +109,27 @@ class Settings(BaseSettings):
     it is a coordinated migration rather than an operation. The default exists
     so the dev stack starts; production must override it."""
 
+    # --- Second factors (FR-MFA-02) --------------------------------------
+    webauthn_rp_id: str = "localhost"
+    """The domain every credential is scoped to.
+
+    This is the load-bearing WebAuthn setting. The browser refuses to use a
+    credential from any origin outside it, which is where phishing resistance
+    comes from — and changing it orphans every credential already registered,
+    because the authenticator will not recognise the new relying party. It is a
+    registrable domain with no scheme and no port, which is why it is not derived
+    from `base_url`: `http://localhost:8000` is not a valid value and the
+    difference is silent until the first enrolment fails.
+    """
+
+    webauthn_origin: str = "http://localhost:8000"
+    """The exact origin the browser will report, scheme and port included.
+
+    Separate from the relying-party id because they are different things that
+    look alike, and because a deployment behind a proxy has an origin its own
+    `base_url` may not describe.
+    """
+
     # --- Directory (FR-DIR-01, FR-DIR-02, FR-DIR-03) ---------------------
     ldap_url: str = ""
     """`ldaps://host:636` or `ldap://host:389`. Empty disables the integration.
