@@ -56,6 +56,7 @@ from campusid.policy.loader import PolicyStore
 from campusid.routes import admin as admin_routes
 from campusid.routes import disco as disco_routes
 from campusid.routes import logout as logout_routes
+from campusid.routes import me as me_routes
 from campusid.routes import mfa as mfa_routes
 from campusid.routes import oauth2 as oauth2_routes
 from campusid.routes import oidc as oidc_routes
@@ -356,5 +357,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(scim_routes.router)
     app.include_router(mfa_routes.router)
     app.include_router(admin_routes.router)
+    app.include_router(me_routes.router)
 
     return app
