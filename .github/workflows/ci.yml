@@ -101,6 +101,31 @@ jobs:
       - name: Broker answers 200 on /healthz
         run: ./scripts/smoke.sh
 
+      # The other half of NFR-SEC-09. tests/unit/test_container_hardening.py
+      # reads the declarations and fails a pull request the moment one goes
+      # missing; this reads the effective runtime configuration, which is the
+      # only one an attacker meets. A compose file that says `read_only` and a
+      # container that is writable are indistinguishable to the first.
+      - name: The running broker is hardened (NFR-SEC-09)
+        run: |
+          set -euo pipefail
+          compose="docker compose -f docker-compose.yml -f docker-compose.ci.yml"
+          id=$($compose ps -q broker)
+          test "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$id")" = true
+          test "$(docker inspect -f '{{index .HostConfig.CapDrop 0}}' "$id")" = ALL
+          test "$(docker inspect -f '{{len .HostConfig.CapAdd}}' "$id")" = 0
+          docker inspect -f '{{range .HostConfig.SecurityOpt}}{{println .}}{{end}}' "$id" \
+            | grep -qx 'no-new-privileges:true'
+          # The process, not the image's declared user: an entrypoint that
+          # escalated would still show `USER campusid` in the Dockerfile.
+          test "$($compose exec -T broker id -u)" = 10001
+          # Proven by attempting it. A root filesystem is read-only or it is not,
+          # and the flag is a claim about that rather than the thing itself.
+          if $compose exec -T broker sh -c 'touch /app/proof' 2>/dev/null; then
+            echo "the root filesystem accepted a write" >&2
+            exit 1
+          fi
+
       - name: Integration tests
         run: |
           docker compose -f docker-compose.yml -f docker-compose.ci.yml \
