@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+from fakeredis import aioredis
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -23,6 +24,7 @@ from campusid.oidc import keys as oidc_keys
 from campusid.oidc.keys import KeySet
 from campusid.saml.gate import AssertionGate, GatePolicy, IdPResolver, TrustedIdP
 from campusid.saml.stores import OutstandingRequest
+from campusid.security.throttle import Throttle
 from tests.support.audit import RecordingAuditLog
 from tests.support.saml_forge import ForgedIdP
 from tests.support.stores import InMemoryReplayCache, InMemoryRequestStore
@@ -180,6 +182,11 @@ def app(settings: Settings, oidc_key_set: KeySet, audit: RecordingAuditLog) -> F
     app = create_app(settings)
     app.state.oidc_keys = oidc_key_set
     app.state.audit = audit
+    # The authentication endpoints consult this before doing any work
+    # (NFR-SEC-10). Wired here rather than made optional at the route, so a
+    # production wiring mistake fails loudly instead of silently disabling the
+    # limit — the test app is meant to look like the real one.
+    app.state.throttle = Throttle(aioredis.FakeRedis(decode_responses=True))
     return app
 
 

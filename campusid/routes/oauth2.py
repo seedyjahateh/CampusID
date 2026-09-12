@@ -68,6 +68,7 @@ from campusid.oidc.tokens import (
 )
 from campusid.routes.errors import reject
 from campusid.saml.stores import utcnow
+from campusid.security.throttle import Throttled
 from campusid.session.cookies import SESSION_COOKIE
 from campusid.session.store import Session
 
@@ -414,6 +415,27 @@ async def token(
     client_secret: Annotated[str | None, Form()] = None,
 ) -> Response:
     """Exchange a code, a refresh token, or a client's own credentials."""
+    # Before the client is authenticated, because authenticating a client means
+    # hashing a secret and that is the work an attacker wants to make us do
+    # (NFR-SEC-10).
+    #
+    # Address only. The per-account ceiling is five a minute, which is right for
+    # a person's credential and badly wrong for a relying party: one confidential
+    # client carries every login a campus makes, and throttling it at five would
+    # break the busy morning it exists for. A client is not an account, and
+    # reading the requirement as though it were would turn a control into an
+    # outage.
+    try:
+        await request.app.state.throttle.check(
+            address=request.client.host if request.client else None,
+        )
+    except Throttled as exc:
+        return JSONResponse(
+            {"error": "slow_down"},
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after), "Cache-Control": "no-store"},
+        )
+
     try:
         client = await _authenticated_client(request, client_id, client_secret)
         if grant_type == GRANT_AUTHORIZATION_CODE:

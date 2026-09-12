@@ -72,6 +72,7 @@ from campusid.saml.metadata_sp import (
 from campusid.saml.stores import RedisReplayCache, RedisRequestStore
 from campusid.scim.groups import GroupStore
 from campusid.scim.store import UserStore
+from campusid.security.throttle import Throttle
 from campusid.session.store import SessionStore
 
 SP_CONTACTS = (
@@ -157,6 +158,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.mfa = FactorStore(session_factory, issuer=settings.service_name)
     app.state.mfa_challenges = ChallengeStore(redis)
     app.state.mfa_limiter = AttemptLimiter(redis)
+    # Attempts per minute on the authentication endpoints (NFR-SEC-10). Distinct
+    # from the second-factor limiter above, which counts failures: a failure
+    # counter does not stop somebody hammering an endpoint with requests that
+    # never reach a credential check.
+    app.state.throttle = Throttle(redis)
     # One client for the life of the process, like the logout notifier's, so a
     # push does not pay a TCP handshake per poll.
     push_http = httpx.AsyncClient()

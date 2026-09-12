@@ -44,6 +44,7 @@ from campusid.routes.errors import reject
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
 from campusid.saml.gate import AssertionFacts
 from campusid.saml.stores import OutstandingRequest, utcnow
+from campusid.security.throttle import Throttled
 from campusid.session.cookies import (
     REQUEST_BINDING_COOKIE,
     SESSION_COOKIE,
@@ -181,6 +182,23 @@ async def assertion_consumer_service(
     """Receive a SAML Response and, if it survives the gate, start a session."""
     state = request.app.state
     reference = audit_correlation_id()
+
+    # Before the gate, because the gate is the expensive part: parsing and
+    # verifying a signature on every request somebody cares to send is a denial
+    # of service that costs the attacker nothing (NFR-SEC-10). Per address only
+    # here — there is no account to charge until the assertion has been read,
+    # and reading it is what this is protecting.
+    try:
+        await state.throttle.check(address=_address(request))
+    except Throttled as exc:
+        await state.audit.record(
+            EventType.AUTH_FAILURE,
+            Outcome.DENIED,
+            reason=exc.reason,
+            detail={"bucket": exc.bucket},
+            **_provenance(request),
+        )
+        return _too_many(exc, reference)
 
     # Every failure from here is a `BrokerError`, so there is one rejection
     # path rather than three shapes of it — which is what makes the uniform
@@ -344,6 +362,31 @@ async def whoami(request: Request) -> Response:
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _address(request: Request) -> str | None:
+    """The peer we are actually talking to.
+
+    Not `X-Forwarded-For`. Behind a proxy this is the proxy, which limits the
+    whole fleet as one — honest, and the wrong direction only for availability.
+    Trusting the header would let an attacker mint a fresh bucket per request by
+    changing one string, which is the wrong direction for everything.
+    """
+    return request.client.host if request.client else None
+
+
+def _too_many(exc: Throttled, reference: str) -> Response:
+    """One shape for a refusal that never reached a credential.
+
+    `Retry-After` is a real header for a real wait. Somebody who has tripped a
+    limit needs to know whether to wait a moment or to stop, and an attacker
+    already knows they are being refused.
+    """
+    return JSONResponse(
+        {"error": "too_many_requests", "reference": reference},
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after), "Cache-Control": "no-store"},
+    )
 
 
 def _provenance(request: Request) -> dict[str, str | None]:
