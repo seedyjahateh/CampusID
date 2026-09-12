@@ -192,15 +192,29 @@ class CachingDecider:
     policy cases fast and honest.
     """
 
-    def __init__(self, policies: Any, cache: DecisionCache) -> None:
+    def __init__(self, policies: Any, cache: DecisionCache, *, metrics: Any = None) -> None:
         self._policies = policies
         self._cache = cache
+        self._metrics = metrics
+        """Optional, because the fifteen policy cases should not need a metrics
+        registry to assert what the engine decides."""
 
     async def decide(self, request: Request) -> CachedDecision:
         cached = await self._cache.get(request)
         if cached is not None:
+            # Counted, cache hit or not. The docstring on `CachedDecision` makes
+            # the same point about the audit record: a dashboard wants decisions
+            # rather than evaluations, and one that counted only the misses would
+            # report a well-cached hour as a drop in traffic.
+            self._count(cached)
             return CachedDecision(decision=cached, cached=True)
 
         decision = self._policies.current.decide(request)
         await self._cache.put(request, decision)
+        self._count(decision)
         return CachedDecision(decision=decision, cached=False)
+
+    def _count(self, decision: Decision) -> None:
+        if self._metrics is None:
+            return
+        self._metrics.authz_decision(decision.effect.value)

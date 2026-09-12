@@ -198,6 +198,10 @@ async def assertion_consumer_service(
             detail={"bucket": exc.bucket},
             **_provenance(request),
         )
+        # `throttled` rather than `failure`: the credential was never examined,
+        # and folding the two together would make a burst of refusals look like
+        # a campus-wide authentication outage.
+        state.metrics.authenticated(idp=None, protocol="saml", outcome="throttled")
         return _too_many(exc, reference)
 
     # Every failure from here is a `BrokerError`, so there is one rejection
@@ -218,6 +222,11 @@ async def assertion_consumer_service(
             reason=exc.reason.value,
             **_provenance(request),
         )
+        # The issuer is deliberately not a label here. It comes off an assertion
+        # that just failed validation, so it is whatever the sender wrote — and a
+        # label taken from an unverified document is a label an attacker picks.
+        state.metrics.authenticated(idp=None, protocol="saml", outcome="failure")
+        state.metrics.assertion_refused(exc.reason.value)
         return reject(exc.reason, exc.detail or "", reference)
 
     if facts.correlation_id:
@@ -242,6 +251,10 @@ async def assertion_consumer_service(
             target=facts.issuer,
             **_provenance(request),
         )
+        # Past the gate, so the issuer is verified and safe to label with. This
+        # is a refusal of our own — the assertion was genuine and we declined to
+        # seat the person — which is worth telling apart from a bad signature.
+        state.metrics.authenticated(idp=facts.issuer, protocol="saml", outcome="refused")
         return reject(exc.reason, exc.detail or "", reference)
 
     # What the IdP said, corrected by what we know. Identifiers we issue and
@@ -292,6 +305,7 @@ async def assertion_consumer_service(
         session_id=session.sid,
         **_provenance(request),
     )
+    state.metrics.authenticated(idp=facts.issuer, protocol="saml", outcome="success")
     log.info(
         "session.established",
         idp=facts.issuer,

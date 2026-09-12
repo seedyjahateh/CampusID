@@ -161,6 +161,7 @@ async def authorize(
         client = await app_state.clients.require(parameters.get("client_id"))
         destination = client.validated_redirect_uri(parameters.get("redirect_uri"))
     except BrokerError as exc:
+        app_state.metrics.authenticated(idp=None, protocol="oidc", outcome="failure")
         return reject(exc.reason, exc.detail or "", reference)
 
     # Phase two: from here a refusal can be reported to the client.
@@ -168,12 +169,20 @@ async def authorize(
         _check_authorization_request(client, parameters)
         session = await _current_session(request)
     except OAuthError as exc:
+        app_state.metrics.authenticated(idp=None, protocol="oidc", outcome="failure")
         return _error_redirect(destination, exc, parameters.get("state"), reference)
 
     if session is None:
+        # Not an outcome. The browser is being sent upstream to authenticate and
+        # will come back through this same endpoint; counting it would make every
+        # successful login arrive as one failure and one success.
         return await _start_login(request, parameters)
 
     code = await _issue_code(request, client, parameters, session)
+    # The upstream that authenticated this person, not the client asking. Which
+    # relying party asked is a different question, and answering it here would
+    # put a per-client dimension on a per-IdP series.
+    app_state.metrics.authenticated(idp=session.idp_entity_id, protocol="oidc", outcome="success")
     query = {"code": code, "state": parameters["state"], "iss": app_state.settings.oidc_issuer}
     log.info("oidc.code.issued", client_id=client.client_id, correlation_id=reference)
     return RedirectResponse(f"{destination}?{urlencode(query)}", status_code=303, headers=NO_STORE)

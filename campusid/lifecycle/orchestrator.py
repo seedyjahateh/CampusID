@@ -26,8 +26,10 @@ step and a missing step read very differently a year later.
 
 from __future__ import annotations
 
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date
 from typing import Any, Protocol
 
@@ -91,6 +93,7 @@ class LifecycleOrchestrator:
         transient: type[Exception] | tuple[type[Exception], ...] = Exception,
         retry_sleep: Any = None,
         decisions: Any = None,
+        metrics: Any = None,
     ) -> None:
         self._rules = rules
         self._lifecycle = lifecycle
@@ -114,6 +117,11 @@ class LifecycleOrchestrator:
         somebody is entitled to (FR-AZ-08). Without it, a deprovisioning would
         take up to a minute to reach whatever is enforcing access."""
 
+        self._metrics = metrics
+        """Where the provisioning latency observation goes (NFR-OBS-03). Optional
+        for the same reason the decision cache is: a lifecycle test asserting
+        what a leaver does should not need a metrics registry to say it."""
+
     # --- joiner and mover -------------------------------------------------
 
     async def transitioned(
@@ -133,15 +141,19 @@ class LifecycleOrchestrator:
         depend on which field the SIS happened to change.
         """
         if after == set() and before:
+            # Returns before the timer below starts, so one chain produces one
+            # latency observation rather than being counted here and again in
+            # `deprovision`.
             return await self.deprovision(person_uuid, before, source=source, on=on)
 
-        rules: LifecycleRules = self._current_rules()
-        delta = rules.transition(before, after, on=on)
-        await self._lifecycle.apply(
-            uuid.UUID(person_uuid), delta, before=before, after=after, source=source
-        )
-        await self._invalidate_decisions(person_uuid)
-        await self._record_delta(person_uuid, before, after, delta, source)
+        with self._timed():
+            rules: LifecycleRules = self._current_rules()
+            delta = rules.transition(before, after, on=on)
+            await self._lifecycle.apply(
+                uuid.UUID(person_uuid), delta, before=before, after=after, source=source
+            )
+            await self._invalidate_decisions(person_uuid)
+            await self._record_delta(person_uuid, before, after, delta, source)
         return delta
 
     # --- leaver -----------------------------------------------------------
@@ -153,6 +165,24 @@ class LifecycleOrchestrator:
         *,
         source: str = "scim",
         on: date | None = None,
+    ) -> Delta:
+        """Time the leaver sequence and run it.
+
+        Split from the sequence itself rather than wrapping it in place, so the
+        method named after FR-LC-03 contains the requirement's order and nothing
+        else. NFR-PROV-02 is the tightest SLO in the system and it is measured
+        from here, which is the whole of the work it names.
+        """
+        with self._timed():
+            return await self._deprovision(person_uuid, before, source=source, on=on)
+
+    async def _deprovision(
+        self,
+        person_uuid: str,
+        before: set[str],
+        *,
+        source: str,
+        on: date | None,
     ) -> Delta:
         """FR-LC-03, in the order the requirement gives.
 
@@ -224,6 +254,25 @@ class LifecycleOrchestrator:
         return delta
 
     # --- helpers ----------------------------------------------------------
+
+    @contextmanager
+    def _timed(self) -> Iterator[None]:
+        """Observe how long a provisioning chain took (NFR-OBS-03).
+
+        `perf_counter` rather than wall clock: this is a duration, and a wall
+        clock that steps backwards during an NTP correction would produce a
+        negative one — which a histogram happily records in its lowest bucket.
+
+        A failed chain is still timed. A run that dead-letters after five retries
+        is the slowest thing this code does, and excluding it would make the
+        latency chart look healthiest exactly when provisioning is worst.
+        """
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            if self._metrics is not None:
+                self._metrics.provisioned(time.perf_counter() - started)
 
     async def _invalidate_decisions(self, person_uuid: str) -> None:
         """Unmake every authorization decision cached about this person.

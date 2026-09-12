@@ -592,6 +592,7 @@ async def _elevate(
         subject=session.person_uuid,
         detail={"kind": kind, "factor": factor, "acr": raised.acr, "amr": list(raised.amr)},
     )
+    state.metrics.mfa_challenge(factor=kind, outcome="success")
     response = JSONResponse(
         {"acr": raised.acr, "amr": list(raised.amr), "auth_time": raised.auth_time.isoformat()},
         headers=NO_STORE,
@@ -606,7 +607,13 @@ async def _failed(request: Request, session: Any, kind: str, reason: str) -> Res
     try:
         outcome = await state.mfa_limiter.record_failure(session.person_uuid, kind)
     except RateLimited as exc:
+        # Already locked when the attempt arrived. Counted as `locked` rather
+        # than `failure`, because nothing was checked — the same distinction the
+        # throttled authentication counter makes.
+        state.metrics.mfa_challenge(factor=kind, outcome="locked")
         return _locked(exc)
+
+    state.metrics.mfa_challenge(factor=kind, outcome="failure")
 
     await state.audit.record(
         EventType.MFA_FAILED,

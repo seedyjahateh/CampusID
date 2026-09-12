@@ -47,6 +47,8 @@ from campusid.middleware import (
     CorrelationMiddleware,
     SecurityHeadersMiddleware,
 )
+from campusid.observability.metrics import Metrics
+from campusid.observability.middleware import ScimMetricsMiddleware
 from campusid.oidc import keys as oidc_keys
 from campusid.oidc.grants import GrantStore
 from campusid.oidc.logout import ClientSessionIndex, LogoutNotifier
@@ -57,6 +59,7 @@ from campusid.routes import admin as admin_routes
 from campusid.routes import disco as disco_routes
 from campusid.routes import logout as logout_routes
 from campusid.routes import me as me_routes
+from campusid.routes import metrics as metrics_routes
 from campusid.routes import mfa as mfa_routes
 from campusid.routes import oauth2 as oauth2_routes
 from campusid.routes import oidc as oidc_routes
@@ -154,7 +157,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.roles = RoleStore(Path(settings.roles_file))
     app.state.role_assignments = RoleAssignmentStore(session_factory, catalogue=app.state.roles)
     app.state.decision_cache = DecisionCache(redis)
-    app.state.decider = CachingDecider(app.state.authorization, app.state.decision_cache)
+    app.state.decider = CachingDecider(
+        app.state.authorization, app.state.decision_cache, metrics=app.state.metrics
+    )
     app.state.mfa = FactorStore(session_factory, issuer=settings.service_name)
     app.state.mfa_challenges = ChallengeStore(redis)
     app.state.mfa_limiter = AttemptLimiter(redis)
@@ -219,6 +224,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # otherwise a deprovisioning takes up to a minute to reach the thing
         # actually enforcing it.
         decisions=app.state.decision_cache,
+        # NFR-PROV-01 and -02 are latency SLOs, and a latency SLO nobody is
+        # measuring in production is a number in a report. This is the chain the
+        # SLO is written about, so it is the chain that gets timed.
+        metrics=app.state.metrics,
     )
     app.state.scim_users = UserStore(
         session_factory,
@@ -346,13 +355,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.readiness_probes = {}
+    # Built in the factory rather than the lifespan, unlike everything else on
+    # `app.state`, because it opens no connection and needs none. That makes it
+    # present for any caller that builds the app without running the lifespan —
+    # most of the test suite — so no route has to ask whether metrics exist, and
+    # a wiring mistake cannot silently turn instrumentation off.
+    app.state.metrics = Metrics()
 
-    # Outermost, so the body cap applies before anything buffers the form.
+    # Order is the reverse of the reading order: Starlette inserts each new
+    # middleware at the *front* of the list, so the last one added is the
+    # outermost. Written here in the order they are added, which means the
+    # request passes through them bottom-up.
+    #
+    # Innermost, so the cap applies while the body is still arriving and before
+    # any handler buffers the form. Nothing outside it reads the body.
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
-    # Innermost of the three, so the correlation id is set before any handler
-    # runs and cleared after the last one — including for a request the body cap
-    # rejects, which is itself worth a correlated record.
+    # Outside the body cap, so a request refused at 413 is still counted: a
+    # client whose bulk payloads are all being rejected is precisely the case
+    # somebody wants a chart of.
+    app.add_middleware(ScimMetricsMiddleware)
+    # Outermost, so the correlation id is set before any handler runs and
+    # cleared after the last one — including for a request the body cap rejects,
+    # which is itself worth a correlated record.
     app.add_middleware(CorrelationMiddleware)
     app.include_router(health.router)
     app.include_router(saml_routes.router)
@@ -364,5 +389,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(mfa_routes.router)
     app.include_router(admin_routes.router)
     app.include_router(me_routes.router)
+    app.include_router(metrics_routes.router)
 
     return app

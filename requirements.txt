@@ -45,6 +45,14 @@ ldap3==2.9.1
 # decision was protecting, rather than the absence of C.
 argon2-cffi==23.1.0
 
+# --- Observability (M5) ----------------------------------------------------
+# The Prometheus exposition format is a wire format somebody else maintains, and
+# getting its escaping, `_total` suffixes or histogram bucket layout subtly wrong
+# produces a scrape that looks fine and parses wrong. ADR-003's argument for
+# owning the SAML gate was about a *security* boundary; a metrics encoding is
+# not one, so this is the library's job. Pure Python, no native build.
+prometheus-client==0.21.1
+
 # --- OIDC and policy (M2) --------------------------------------------------
 # Attribute release policy is declarative YAML (FR-ARP-01). Loaded with
 # `safe_load` only — `yaml.load` constructs arbitrary Python objects, which
