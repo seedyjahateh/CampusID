@@ -65,6 +65,18 @@ x-broker-env: &broker-env
   # this holds. Enumerated rather than inferred, because "a test account" is not
   # a property anybody can read off a row.
   CAMPUSID_IMPERSONATION_FIXTURES: ${CAMPUSID_IMPERSONATION_FIXTURES:-}
+  # NFR-SEC-10's defaults are 10/min/IP and 5/min/account, and this stack raises
+  # the address bucket well above them. The integration suite drives several
+  # hundred authentications a minute out of one container, so the broker sees the
+  # whole suite as a single client hammering the endpoint — which is precisely
+  # the traffic the limit exists to refuse, and it does. Lowering the suite's
+  # request rate would be testing the limiter rather than the protocol.
+  #
+  # The limit itself is asserted against the requirement's own numbers in
+  # `tests/security/test_auth_rate_limit.py`, which drives the `Throttle`
+  # directly and does not depend on this value. The account bucket is left at the
+  # default because nothing in this broker charges it.
+  CAMPUSID_AUTH_RATE_PER_ADDRESS: ${CAMPUSID_AUTH_RATE_PER_ADDRESS:-10000}
   TZ: UTC
 
 services:

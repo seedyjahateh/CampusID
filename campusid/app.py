@@ -167,7 +167,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # from the second-factor limiter above, which counts failures: a failure
     # counter does not stop somebody hammering an endpoint with requests that
     # never reach a credential check.
-    app.state.throttle = Throttle(redis)
+    app.state.throttle = Throttle(
+        redis,
+        per_address=settings.auth_rate_per_address,
+        per_account=settings.auth_rate_per_account,
+        window=settings.auth_rate_window_seconds,
+    )
     # One client for the life of the process, like the logout notifier's, so a
     # push does not pay a TCP handshake per poll.
     push_http = httpx.AsyncClient()

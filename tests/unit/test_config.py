@@ -55,6 +55,36 @@ def test_clock_skew_outside_bounds_fails_at_startup(skew: int) -> None:
         Settings(saml_clock_skew_seconds=skew)
 
 
+def test_the_rate_limits_default_to_the_requirements_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFR-SEC-10 names 10 a minute per address and 5 per account.
+
+    Asserted on the *default* rather than on a constant, because the values are
+    configurable and the way that goes wrong is somebody lowering the default to
+    match a deployment instead of setting the deployment.
+
+    The ambient variable is removed first: the compose stack raises the address
+    limit for the integration suite, and a test that read it would assert what
+    this environment happens to set rather than what the code ships with.
+    """
+    monkeypatch.delenv("CAMPUSID_AUTH_RATE_PER_ADDRESS", raising=False)
+
+    settings = Settings()
+
+    assert settings.auth_rate_per_address == 10
+    assert settings.auth_rate_per_account == 5
+    assert settings.auth_rate_window_seconds == 60
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_rate_limit_of_zero_does_not_start(value: int) -> None:
+    """Zero refuses every login in the institution, and it is one keystroke away
+    from a number somebody meant to type."""
+    with pytest.raises(ValidationError):
+        Settings(auth_rate_per_address=value)
+
+
 def test_sync_database_url_drops_the_async_driver() -> None:
     settings = Settings(database_url="postgresql+asyncpg://u:p@db:5432/campusid")
 

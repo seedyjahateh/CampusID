@@ -245,6 +245,23 @@ class Settings(BaseSettings):
     (PRD: ``test_skew_config_bounds.py``).
     """
 
+    auth_rate_per_address: int = Field(default=10, ge=1)
+    auth_rate_per_account: int = Field(default=5, ge=1)
+    auth_rate_window_seconds: int = Field(default=60, ge=1)
+    """NFR-SEC-10's numbers, as defaults rather than as constants.
+
+    Configurable because the per-address bucket is the one limit here whose
+    correct value is a property of the *deployment* rather than of the protocol.
+    Ten a minute is right for one browser and wrong for a campus behind a single
+    NAT gateway, where one address is ten thousand people — and an operator who
+    cannot raise it will turn the limit off instead.
+
+    They are bounded below but not above. A ceiling would be arbitrary, and the
+    failure it would prevent — somebody setting a million — is visible in a diff,
+    while the failure a low bound prevents is an accidental zero that refuses
+    every login in the institution.
+    """
+
     @field_validator("base_url")
     @classmethod
     def _no_trailing_slash(cls, value: str) -> str:
