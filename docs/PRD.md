@@ -399,7 +399,7 @@ The audit design starts from five questions the security office actually asks:
 
 | ID | Requirement | Verify |
 |---|---|---|
-| NFR-SEC-01 | Session cookies: `__Host-` prefix, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain`. | `test_cookie_attributes.py` asserts exact `Set-Cookie` header |
+| NFR-SEC-01 | **Two** cookies, both `__Host-` prefixed, `Secure`, `HttpOnly`, `Path=/`, no `Domain`. The session cookie is `SameSite=Lax`. The short-lived request-binding cookie is `SameSite=None`, because a `Lax` cookie is not sent on the cross-site POST a real IdP makes to the ACS endpoint — and without a binding nonce the flow is open to login-CSRF. Amended during M1; ADR-004 argues it. | `test_cookie_attributes.py` asserts the exact `Set-Cookie` for both |
 | NFR-SEC-02 | Session identifiers ≥ 256 bits from a CSPRNG; no user data encoded; regenerated on privilege change (FR-SES-03). | `test_session_entropy.py` (statistical + source inspection) |
 | NFR-SEC-03 | All HTTP responses carry: `Strict-Transport-Security: max-age=31536000; includeSubDomains`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a CSP with `default-src 'none'`, no `unsafe-inline` scripts. | `test_security_headers.py` on every route |
 | NFR-SEC-04 | TLS 1.2 minimum (1.3 preferred); no RSA key exchange, no CBC ciphers, no compression. | `testssl.sh` in CI against the dev stack; findings gate merge |
@@ -572,17 +572,28 @@ sequenceDiagram
 
     rect rgb(245,245,245)
         Note over BR: Assertion validation gate
-        BR->>BR: 1. XML parse hardened (no DTD/XXE)
-        BR->>BR: 2. verify signature vs IdP metadata cert (RSA-SHA256)
-        BR->>BR: 3. decrypt EncryptedAssertion if present
-        BR->>BR: 4. XSW check: signed element == data element
-        BR->>BR: 5. Destination == ACS URL
-        BR->>BR: 6. InResponseTo matches outstanding request
-        BR->>BR: 7. Audience == broker entityID
-        BR->>BR: 8. NotBefore/NotOnOrAfter within skew (180s)
-        BR->>BR: 9. assertion ID not in replay cache → insert with TTL
-        BR->>BR: 10. AuthnContextClassRef satisfies request
+        BR->>BR: 1. XML parse hardened (no DTD/XXE, comments stripped)
+        BR->>BR: 2. XSW structural check: one Response, one Assertion
+        BR->>BR: 3. algorithm allowlist pre-flight (reject SHA-1, #WithComments)
+        BR->>BR: 4. decrypt EncryptedAssertion if present
+        BR->>BR: 5. verify signature vs IdP metadata cert (RSA-SHA256)
+        BR->>BR: 6. Destination == ACS URL
+        BR->>BR: 7. InResponseTo matches outstanding request
+        BR->>BR: 8. Audience == broker entityID
+        BR->>BR: 9. NotBefore/NotOnOrAfter within skew (180s)
+        BR->>BR: 10. assertion ID not in replay cache → insert with TTL
+        BR->>BR: 11. AuthnContextClassRef recorded (enforced at step-up, M4)
     end
+
+> **Amended during M1.** This ordering replaces the original, in which verify
+> preceded decrypt and the replay-cache insert sat above the signature check.
+> Both changes are security properties rather than tidying, and ADR-004 argues
+> them: there is nothing to verify until an encrypted assertion is decrypted, and
+> a replay cache written before the signature is checked lets an unauthenticated
+> attacker poison it with observed assertion ids so the victim's real login is
+> refused as a replay. The algorithm pre-flight was added so "SHA-1" and "wrong
+> key" are different reason codes rather than two readings of one library
+> exception.
 
     BR->>AUD: saml.assertion.accepted {idp, subject, acr}
     BR->>BR: resolve/link person from ePPN + subject-id
@@ -1273,7 +1284,7 @@ CampusID states its assurance levels explicitly, distinguishing what the **broke
 | **AAL2** | Two distinct authentication factors; the target level for all sensitive resources. | (a) two factor categories evidenced in `amr`; (b) approved cryptographic authenticators (TOTP per RFC 6238, or WebAuthn); (c) reauthentication at 12 h absolute / 30 min inactivity; (d) rate limiting ≤ 100 consecutive failed attempts (this project enforces 5/15 min, far stricter); (e) authenticator secrets encrypted at rest; (f) replay resistance for the second factor | `test_amr_acr_accuracy.py`, `test_session_timeouts.py`, `test_mfa_rate_limit.py`, `test_totp.py` (replay case) |
 | **AAL3-partial** | **Not claimed.** WebAuthn provides the phishing-resistance and verifier-impersonation-resistance properties AAL3 requires, but this project does not enforce hardware-backed authenticator attestation, does not require attestation validation, and does not restrict to hardware authenticators. Documented as future work. | Recorded as a limitation in `docs/security/assurance.md` | `test_no_aal3_claim.py` asserts the string `aal3` never appears in any issued `acr` |
 | **FAL1** | Bearer assertion, signed. | SAML: signed assertion required. OIDC: signed ID token. | `test_saml_response_signature.py`, `test_id_token_claims.py` |
-| **FAL2** | Bearer assertion, signed **and encrypted** to the relying party. Claimed for SPs whose policy includes non-directory attributes. | `require_encrypted_assertion: true` enforced per SP; assertion encrypted with the SP's public key | `test_saml_encrypted_assertion.py` + policy test asserting the flag cannot be false for restricted-attribute SPs |
+| **FAL2** | Bearer assertion, signed **and encrypted** to the relying party. Claimed for SPs whose policy includes non-directory attributes. *Amended during M1: the claim moved to M2, since the policy flag that mandates encryption (`require_encrypted_assertion`) is part of the attribute-release work and a claim that nothing enforces is not a claim.* | `require_encrypted_assertion: true` enforced per SP; assertion encrypted with the SP's public key | `test_saml_encrypted_assertion.py` + policy test asserting the flag cannot be false for restricted-attribute SPs |
 | **FAL3** | **Not claimed** — requires holder-of-key assertions. | Documented limitation; DPoP is noted as the OIDC-side path in §15.3 | `test_no_fal3_claim.py` |
 
 **Rev. 4 note.** SP 800-63-4 restructures some requirements (notably around syncable authenticators/passkeys and reauthentication). The controls above satisfy both revisions for AAL2; `docs/security/assurance.md` carries a per-revision table and cites the specific control sections, and is dated so a reviewer knows which revision was consulted.
@@ -1590,14 +1601,39 @@ Deliverables: FR-FED-01/02/03, FR-SAML-01…10, FR-SES-01/02/03/06, NFR-SEC-01/0
 **Acceptance criteria:**
 1. A browser completes SP-initiated SSO against Keycloak and lands authenticated in the broker session.
 2. The same flow works against SimpleSAMLphp, selected via `/disco`.
-3. All 20 tests in `test_saml_validation_matrix.py` pass (10 positive, 10 negative).
+3. Every check in `test_saml_validation_matrix.py` passes in both directions — at least 20 tests, one accepting and one rejecting per check.
 4. All 8 XSW variants are rejected.
 5. Replaying a captured assertion is rejected within the validity window.
 6. SP metadata validates against the SAML metadata XSD.
-7. `Set-Cookie` matches the exact expected attribute string.
+7. `Set-Cookie` matches the exact expected attribute string, for both cookies.
 8. CI integration job is green with the federation containers running.
 
 **Risk checkpoint:** if XML signature validation (`xmlsec1` bindings, canonicalization) has consumed more than 2 days, drop SimpleSAMLphp to Week 4 and proceed with Keycloak only. Multi-IdP is valuable but not load-bearing.
+
+> **Amended during M1.** Three changes, all made before the work rather than to
+> excuse it.
+>
+> **The milestone split into M1a and M1b.** M1a carries criteria 1 and 3 through
+> 8; criterion 2 (a second IdP behind `/disco`) moved to M1b. The split was taken
+> because the validation gate is the deliverable and a second IdP is a second
+> configuration of the same gate.
+>
+> **The estimate was wrong and was corrected twice.** ~28 h quoted, ~48 h
+> bottom-up, and ~55 h after design review added four gate checks, affirmative
+> XSW rejection, an SP-key bootstrap sidecar and the comment-truncation defence.
+> That is two and a half weeks at this project's stated pace, not one, and the
+> whole project is realistically 7–8 weeks rather than 5. Recorded here rather
+> than absorbed silently, because a plan that quietly slips is a plan nobody can
+> learn from.
+>
+> **Criterion 3's count is now a floor rather than a total.** The gate grew from
+> 10 checks to 15, so "20 tests (10 positive, 10 negative)" understated it; the
+> criterion is one accepting and one rejecting test per check, whatever the
+> number of checks turns out to be.
+>
+> **The risk checkpoint was overtaken.** ADR-003 replaced `xmlsec1` with
+> `signxml`, so the canonicalisation tar pit it guarded against did not arise.
+> The clause is left standing because it was a real judgement at the time.
 
 ### M2 — Week 2: Attribute release policy + OIDC provider
 

@@ -172,6 +172,7 @@ docs/          PRD.md · decisions/ (ADRs)
 | [002](docs/decisions/ADR-002-forward-only-migrations.md) | Forward-only migrations behind a Postgres advisory lock |
 | [003](docs/decisions/ADR-003-signxml-over-pysaml2.md) | Own the SAML validation gate on signxml — what that buys and what it costs |
 | [004](docs/decisions/ADR-004-gate-ordering-and-session-cookies.md) | Check order as a security property, and why the session needs two cookies |
+| [005](docs/decisions/ADR-005-append-only-audit-trail.md) | An audit trail that can prove it has not been edited — and what that does not prove |
 
 ## Data statement
 
