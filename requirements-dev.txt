@@ -1,8 +1,8 @@
 -r requirements.txt
 
-pytest==8.3.4
-pytest-asyncio==0.25.0
-pytest-cov==6.0.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
 ruff==0.8.4
 mypy==1.14.0
 lxml-stubs==0.5.1
@@ -11,3 +11,8 @@ types-PyYAML==6.0.12.20240917
 # In-memory Redis so the replay cache and request store are unit-testable
 # without containers (the gate must reach 95% coverage in the unit job).
 fakeredis==2.37.1
+
+# The dependency audit (NFR-SEC-08). Pinned and locked like everything else: a
+# scanner that floats is a scanner whose result can change between two runs of
+# the same commit, which is the one property a merge gate cannot have.
+pip-audit==2.7.3
