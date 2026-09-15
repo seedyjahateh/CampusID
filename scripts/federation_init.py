@@ -265,8 +265,10 @@ difference is that this one is *only* usable against a broker whose own
 full of fixture people, and the alternative is a generated secret that the
 integration tests would then have to read out of the container.
 
-A real deployment registers its SIS through the admin API and gets a generated
-secret once. This script runs only under the `federation` compose profile.
+A real deployment registers its SIS with a generated secret handed over once —
+see `docs/runbooks/sp-onboarding.md`, which also records that there is no admin
+endpoint for this yet. This script runs only under the `federation` compose
+profile.
 """
 
 

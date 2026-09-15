@@ -160,9 +160,23 @@ that reproduces the quickstart on a clean runner.
 campusid/      broker application (saml/ oidc/ scim/ directory/ policy/ mfa/ audit/ arrive per milestone)
 migrations/    Alembic revisions; forward-only, advisory-locked (ADR-002)
 tests/         unit/ (no containers) · integration/ (live stack) · security/ · e2e/
-scripts/       entrypoint.sh · smoke.sh
-docs/          PRD.md · decisions/ (ADRs)
+scripts/       entrypoint.sh · smoke.sh · operator tools (reconcile, prune, verify chain)
+docs/          PRD.md · decisions/ (ADRs) · runbooks/
 ```
+
+## Runbooks
+
+What to do when something needs doing, written for whoever is on call rather than
+for whoever wrote the code. Each carries the date somebody last ran the steps.
+
+| Runbook | When you need it |
+|---|---|
+| [Key rotation](docs/runbooks/key-rotation.md) | Replacing SAML signing, SAML encryption, OIDC signing keys, or the pairwise salt |
+| [IdP onboarding](docs/runbooks/idp-onboarding.md) | A new identity provider wants to federate with us |
+| [SP onboarding](docs/runbooks/sp-onboarding.md) | A new application wants to authenticate people through us |
+| [Compromised account](docs/runbooks/compromised-account.md) | Somebody's credentials are in the wrong hands |
+| [Provisioning backlog](docs/runbooks/provisioning-backlog.md) | Writes to a downstream system are failing or piling up |
+| [Drift remediation](docs/runbooks/drift-remediation.md) | The directory and the broker disagree about who exists |
 
 ## Design decisions
 
