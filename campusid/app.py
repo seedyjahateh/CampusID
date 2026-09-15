@@ -29,7 +29,7 @@ from campusid.directory.profiles import profile as directory_profile
 from campusid.directory.writes import DirectoryWriter
 from campusid.federation.registry import FederationRegistry
 from campusid.identity.registry import IdentityRegistry
-from campusid.keys import load_or_create
+from campusid.keys import load_or_create_set
 from campusid.lifecycle.deadletter import DeadLetterQueue
 from campusid.lifecycle.orchestrator import LifecycleOrchestrator
 from campusid.lifecycle.reconciliation import Reconciler
@@ -108,12 +108,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Generated on first start and kept in a mounted volume, so the identity a
     # peer has trusted survives a restart. See campusid/keys.py for why no
     # development key is committed.
-    signing_key = load_or_create(
-        Path(settings.saml_key_dir), "sp-signing", common_name=settings.base_url
-    )
+    #
+    # A set rather than a key, because a certificate a peer has pinned cannot be
+    # replaced in one step: during a rotation both are published and only one is
+    # used (NFR-SEC-06). Outside a rotation the set holds exactly one.
+    key_dir = Path(settings.saml_key_dir)
+    signing_keys = load_or_create_set(key_dir, "sp-signing", common_name=settings.base_url)
+    # Separate material from the signing key, not a second use of it. A key that
+    # both signs and decrypts means a peer can ask us to decrypt something we
+    # signed, and the two have opposite rotation directions besides: a signing
+    # key is published before it is used, an encryption key is used after the
+    # peer stops using it.
+    encryption_keys = load_or_create_set(key_dir, "sp-encryption", common_name=settings.base_url)
+    signing_key = signing_keys.active
     registry = FederationRegistry(session_factory)
 
     app.state.sp_signing_key = signing_key
+    app.state.sp_signing_keys = signing_keys
+    app.state.sp_encryption_keys = encryption_keys
     app.state.registry = registry
     app.state.request_store = RedisRequestStore(redis)
     app.state.sessions = SessionStore(redis)
@@ -122,7 +134,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             entity_id=settings.saml_entity_id,
             acs_url=settings.saml_acs_url,
             slo_url=settings.saml_slo_url,
-            signing_certificates=(signing_key.certificate_pem,),
+            signing_certificates=signing_keys.certificates,
+            # Published, which is what makes FR-SAML-03 usable: an IdP encrypts
+            # to a certificate it finds in our metadata, so a broker that can
+            # decrypt but advertises no encryption key is one no peer will ever
+            # send an encrypted assertion to.
+            encryption_certificates=encryption_keys.certificates,
             contacts=SP_CONTACTS,
             requested_attributes=DEFAULT_REQUESTED_ATTRIBUTES,
         )
@@ -136,6 +153,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolve_idp=registry.resolve_trusted_idp,
         replay_cache=RedisReplayCache(redis),
         request_store=app.state.request_store,
+        # Every held key, so an IdP still encrypting to the outgoing certificate
+        # during a rotation is not refused.
+        decryption_keys=encryption_keys.private_keys,
     )
 
     # The OIDC signing key shares the SAML volume: an ephemeral one would

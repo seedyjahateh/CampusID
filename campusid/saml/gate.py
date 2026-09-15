@@ -161,14 +161,21 @@ class AssertionGate:
         replay_cache: ReplayCache,
         request_store: RequestStore,
         now: Callable[[], datetime] = utcnow,
-        decryption_key: bytes | None = None,
+        decryption_keys: tuple[bytes, ...] = (),
     ) -> None:
         self._policy = policy
         self._resolve_idp = resolve_idp
         self._replay = replay_cache
         self._requests = request_store
         self._now = now
-        self._decryption_key = decryption_key
+        self._decryption_keys = decryption_keys
+        """Every key an `EncryptedKey` might be wrapped to, not one.
+
+        During an encryption-key rotation a peer that has not refreshed our
+        metadata is still encrypting to the outgoing certificate, so accepting
+        only the current key would make the overlap window an outage for exactly
+        the peers the overlap exists to protect (NFR-SEC-06).
+        """
 
     async def validate(self, document: bytes) -> AssertionFacts:
         """Run every check in order, or raise `SamlRejected`."""
@@ -299,13 +306,13 @@ class AssertionGate:
         than being grafted back into the Response, so an attacker cannot use
         the outer tree to influence what the reference resolves to.
         """
-        if self._decryption_key is None:
+        if not self._decryption_keys:
             raise SamlRejected(
                 ReasonCode.DECRYPTION_FAILED,
                 "the response is encrypted but no decryption key is configured",
             )
 
-        assertion = decrypt_assertion(encrypted, self._decryption_key)
+        assertion = self._decrypt(encrypted)
         if assertion.tag != Q_ASSERTION:
             raise SamlRejected(
                 ReasonCode.DECRYPTION_FAILED,
@@ -319,6 +326,34 @@ class AssertionGate:
             location=RESPONSE_SIGNATURE_LOCATION,  # the fragment's own root
             certificates=idp.signing_certificates,
         ).element
+
+    def _decrypt(self, encrypted: etree._Element) -> etree._Element:
+        """Try each held key, reporting one failure however many were tried.
+
+        The uniform error is the point and the reason this loop is here rather
+        than at the call site: `decrypt_assertion` refuses to say *which* step
+        failed, and a caller that reported "3 keys tried, all failed" would hand
+        back the oracle that care was taken to remove.
+
+        Trying every key is not a timing concern worth designing around. An RSA
+        unwrap against a key set of two or three is not a signal an attacker can
+        separate from the rest of a request, and the alternative — matching on
+        the `KeyInfo` a peer supplied — takes the choice of key from an
+        attacker-controlled field.
+        """
+        refusal: SamlRejected | None = None
+        for key in self._decryption_keys:
+            try:
+                return decrypt_assertion(encrypted, key)
+            except SamlRejected as exc:
+                refusal = exc
+        # The refusal from the last attempt rather than a new one. Every failure
+        # inside `decrypt_assertion` already carries the same uniform message, so
+        # re-raising keeps a two-key deployment indistinguishable from a one-key
+        # deployment — which is the property, and a fresh message here would have
+        # quietly announced how many keys are held.
+        assert refusal is not None
+        raise refusal
 
     # --- 8. destination ----------------------------------------------------
 

@@ -11,7 +11,7 @@ import pytest
 
 from campusid.app import create_app, lifespan
 from campusid.config import Settings
-from campusid.keys import SigningMaterial
+from campusid.keys import KeySet, SigningMaterial
 
 
 class _FakeEngine:
@@ -40,8 +40,13 @@ def stubs(
     monkeypatch.setattr("campusid.app.create_redis", lambda _settings: redis)
     monkeypatch.setattr("campusid.app.create_session_factory", lambda _engine: object())
     # Key generation is real elsewhere; here it would cost seconds per test to
-    # re-derive material these assertions never look at.
-    monkeypatch.setattr("campusid.app.load_or_create", lambda _dir, _name, common_name: sp_material)
+    # re-derive material these assertions never look at. Two roles are built at
+    # startup now — signing and encryption — and both come back as the same
+    # session-scoped material, which is fine because nothing here reads it.
+    monkeypatch.setattr(
+        "campusid.app.load_or_create_set",
+        lambda _dir, _name, common_name: KeySet(active=sp_material),
+    )
     return engine, redis
 
 

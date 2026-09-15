@@ -52,7 +52,7 @@ def encrypting_gate(
         resolve_idp=resolve_idp,
         replay_cache=replay_cache,
         request_store=request_store,
-        decryption_key=sp_material.private_pem,
+        decryption_keys=(sp_material.private_pem,),
     )
 
 
@@ -70,6 +70,38 @@ async def test_an_encrypted_assertion_is_accepted(
 
     assert facts.name_id == "sam.obrien@campus.edu"
     assert facts.assertion_id == "_assertion1"
+
+
+async def test_an_assertion_encrypted_to_the_outgoing_key_still_decrypts(
+    gate_policy: GatePolicy,
+    resolve_idp: IdPResolver,
+    replay_cache: InMemoryReplayCache,
+    request_store: InMemoryRequestStore,
+    sp_material: SigningMaterial,
+    idp: ForgedIdP,
+) -> None:
+    """The encryption-key overlap window (NFR-SEC-06).
+
+    An IdP that has not refreshed our metadata is still encrypting to the
+    certificate it already had. Holding only the incoming key would make the
+    overlap an outage for exactly the peers it exists to protect, so the gate
+    tries every key it holds.
+
+    The incoming key is listed first, so this fails if the gate stops after the
+    first attempt rather than passing by luck of ordering.
+    """
+    incoming = generate_self_signed("https://broker.test", key_size=2048)
+    gate = AssertionGate(
+        policy=gate_policy,
+        resolve_idp=resolve_idp,
+        replay_cache=replay_cache,
+        request_store=request_store,
+        decryption_keys=(incoming.private_pem, sp_material.private_pem),
+    )
+
+    facts = await gate.validate(_encrypted(idp, sp_material))
+
+    assert facts.name_id == "sam.obrien@campus.edu"
 
 
 async def test_the_response_really_was_encrypted(
