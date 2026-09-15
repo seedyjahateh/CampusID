@@ -113,13 +113,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # replaced in one step: during a rotation both are published and only one is
     # used (NFR-SEC-06). Outside a rotation the set holds exactly one.
     key_dir = Path(settings.saml_key_dir)
-    signing_keys = load_or_create_set(key_dir, "sp-signing", common_name=settings.base_url)
+    # Generated on first start in development and never in production. A
+    # production node that comes up with an empty volume — because the shared
+    # mount was not attached — would otherwise mint its own identity and publish
+    # a certificate no peer has been told to trust, which fails intermittently
+    # and looks like a signature problem. See docs/ha-design.md.
+    generate_missing = not settings.is_production
+    signing_keys = load_or_create_set(
+        key_dir, "sp-signing", common_name=settings.base_url, generate_missing=generate_missing
+    )
     # Separate material from the signing key, not a second use of it. A key that
     # both signs and decrypts means a peer can ask us to decrypt something we
     # signed, and the two have opposite rotation directions besides: a signing
     # key is published before it is used, an encryption key is used after the
     # peer stops using it.
-    encryption_keys = load_or_create_set(key_dir, "sp-encryption", common_name=settings.base_url)
+    encryption_keys = load_or_create_set(
+        key_dir,
+        "sp-encryption",
+        common_name=settings.base_url,
+        generate_missing=generate_missing,
+    )
     signing_key = signing_keys.active
     registry = FederationRegistry(session_factory)
 
@@ -161,7 +174,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The OIDC signing key shares the SAML volume: an ephemeral one would
     # invalidate every outstanding token on restart, and every client that
     # cached our JWKS would refuse tokens it should honour.
-    app.state.oidc_keys = oidc_keys.load_or_create_key_set(Path(settings.saml_key_dir))
+    app.state.oidc_keys = oidc_keys.load_or_create_key_set(
+        key_dir, generate_missing=generate_missing
+    )
     app.state.clients = ClientRegistry(session_factory)
     app.state.grants = GrantStore(redis)
     app.state.pushed_requests = PushedRequestStore(redis)

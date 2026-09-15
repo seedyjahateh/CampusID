@@ -26,6 +26,7 @@ from typing import Any, Final
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from campusid.keys import KeyMaterialMissing
 from campusid.oidc.jwt import RS256, SigningKey, b64url
 
 KEY_SIZE: Final = 2048
@@ -125,19 +126,32 @@ ACTIVE_KEY_FILE: Final = "oidc-active.key"
 RETIRING_DIR: Final = "oidc-retiring"
 
 
-def load_or_create_key_set(directory: Path, *, key_size: int = KEY_SIZE) -> KeySet:
+def load_or_create_key_set(
+    directory: Path, *, key_size: int = KEY_SIZE, generate_missing: bool = True
+) -> KeySet:
     """Load the signing key set, generating the active key if it is absent.
 
     Idempotent, so restarting keeps the identity clients have cached. Every
     private key in `oidc-retiring/` is published and accepted but never used to
     sign, which is what makes a rotation invisible to a client holding a token
     minted a minute before it.
+
+    `generate_missing` is false in production, for the reason `campusid/keys.py`
+    sets out: three nodes each generating their own key publish three different
+    JWKS documents, and a relying party validating a token against the wrong one
+    sees a signature failure rather than a configuration problem.
     """
     directory.mkdir(parents=True, exist_ok=True)
     active_path = directory / ACTIVE_KEY_FILE
 
     if active_path.is_file():
         active = _read_key(active_path)
+    elif not generate_missing:
+        raise KeyMaterialMissing(
+            f"{active_path} is absent and this deployment does not generate keys. "
+            "Provision the key material before starting, or every node will publish "
+            "a different JWKS. See docs/runbooks/key-rotation.md."
+        )
     else:
         active = generate(key_size)
         _write_key(active_path, active)

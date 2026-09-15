@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from campusid import keys
-from campusid.keys import KeySet, fingerprint, load_or_create_set
+from campusid.keys import KeyMaterialMissing, KeySet, fingerprint, load_or_create_set
 from campusid.oidc import keys as oidc_keys
 from campusid.policy.pairwise import pairwise_id
 
@@ -173,6 +173,64 @@ def test_a_half_written_pair_does_not_stop_the_broker_starting(
     reloaded = load_or_create_set(key_dir, "sp-signing", SUBJECT)
 
     assert reloaded.certificates == (signing.active.certificate_pem,)
+
+
+# --- generating a key is a development affordance ----------------------------
+
+
+def test_a_missing_key_is_generated_in_development(key_dir: Path) -> None:
+    """The affordance that makes the quickstart one command.
+
+    No development key is committed — a repository about credential handling that
+    contains a private key is arguing against itself — so the first start has to
+    mint one.
+    """
+    assert load_or_create_set(key_dir, "sp-signing", SUBJECT).active.certificate_pem
+
+
+def test_a_missing_key_is_fatal_when_generation_is_disallowed(key_dir: Path) -> None:
+    """What stops a three-node deployment publishing three identities.
+
+    Each node generating its own keypair would advertise a different certificate
+    in SP metadata and a different JWKS, and which one a peer got would depend on
+    which node answered. Logins would fail intermittently and the failure would
+    look like a signature problem, which is among the hardest things here to
+    diagnose from outside.
+
+    So a production node that comes up with an empty volume refuses to start
+    rather than minting a second identity. The accident this catches is the one
+    that happens by omission — a shared mount not attached — rather than by
+    somebody deliberately provisioning different keys, which no single process
+    could see.
+    """
+    with pytest.raises(KeyMaterialMissing, match="does not generate keys"):
+        load_or_create_set(key_dir, "sp-signing", SUBJECT, generate_missing=False)
+
+
+def test_an_existing_key_loads_whether_or_not_generation_is_allowed(key_dir: Path) -> None:
+    """The refusal is about *creating*, not about loading. A production node with
+    its key present must start normally, which is the ordinary case."""
+    minted = load_or_create_set(key_dir, "sp-signing", SUBJECT).active
+
+    loaded = load_or_create_set(key_dir, "sp-signing", SUBJECT, generate_missing=False)
+
+    assert loaded.active.certificate_pem == minted.certificate_pem
+
+
+def test_a_missing_oidc_key_is_fatal_when_generation_is_disallowed(tmp_path: Path) -> None:
+    """The same rule for the token-signing key, where the symptom differs: a
+    relying party validating against the wrong JWKS sees a signature failure
+    rather than a configuration problem."""
+    with pytest.raises(KeyMaterialMissing, match="does not generate keys"):
+        oidc_keys.load_or_create_key_set(tmp_path, generate_missing=False)
+
+
+def test_an_existing_oidc_key_loads_when_generation_is_disallowed(tmp_path: Path) -> None:
+    minted = oidc_keys.load_or_create_key_set(tmp_path, key_size=2048)
+
+    loaded = oidc_keys.load_or_create_key_set(tmp_path, generate_missing=False)
+
+    assert loaded.active.kid == minted.active.kid
 
 
 # --- SAML encryption: use, then unpublish ------------------------------------

@@ -82,13 +82,41 @@ def generate_self_signed(
     )
 
 
-def load_or_create(directory: Path, name: str, common_name: str) -> SigningMaterial:
+class KeyMaterialMissing(RuntimeError):
+    """A key had to be present and was not.
+
+    Raised at startup rather than at the first login, and deliberately fatal.
+    See `load_or_create` for the deployment this exists to stop.
+    """
+
+
+def load_or_create(
+    directory: Path, name: str, common_name: str, *, generate_missing: bool = True
+) -> SigningMaterial:
     """Load the named keypair, generating and persisting it if absent.
 
     Idempotent, so restarting the broker keeps the identity a peer already
     trusts. Losing the volume means a new certificate and a metadata exchange
     that has to be redone — the same consequence a real deployment faces, which
     is why the volume is named rather than anonymous.
+
+    **`generate_missing` is false in production, and that is the interesting
+    part.** Generating on first start is right for one node and wrong for three:
+    each would mint its own keypair, publish a different certificate in SP
+    metadata and a different JWKS, and which one a peer got would depend on which
+    node answered. Logins would fail intermittently and the failure would look
+    like a signature problem, which is among the hardest things in this system to
+    diagnose from the outside.
+
+    So in production a missing key is fatal at startup. That converts the common
+    accident — a node brought up with an empty volume because the shared mount
+    was not attached — from a broker quietly serving a second identity into one
+    that refuses to start and says which file it wanted.
+
+    It does not catch every version of the mistake. Three nodes each holding a
+    *different* pre-provisioned key still disagree, and nothing a single process
+    can see would reveal that. What it catches is the one that happens by
+    omission rather than by commission, which is the one that happens.
     """
     directory.mkdir(parents=True, exist_ok=True)
     key_path = directory / f"{name}.key"
@@ -98,6 +126,13 @@ def load_or_create(directory: Path, name: str, common_name: str) -> SigningMater
         return SigningMaterial(
             private_pem=key_path.read_bytes(),
             certificate_pem=certificate_path.read_text(encoding="ascii"),
+        )
+
+    if not generate_missing:
+        raise KeyMaterialMissing(
+            f"{key_path} is absent and this deployment does not generate keys. "
+            "Provision the key material before starting, or every node will publish "
+            "a different identity. See docs/runbooks/key-rotation.md."
         )
 
     material = generate_self_signed(common_name)
@@ -179,9 +214,11 @@ def fingerprint(certificate_pem: str) -> str:
     return certificate.fingerprint(hashes.SHA256()).hex()
 
 
-def load_or_create_set(directory: Path, name: str, common_name: str) -> KeySet:
+def load_or_create_set(
+    directory: Path, name: str, common_name: str, *, generate_missing: bool = True
+) -> KeySet:
     """Load every key of one role, generating the active one if it is absent."""
-    active = load_or_create(directory, name, common_name)
+    active = load_or_create(directory, name, common_name, generate_missing=generate_missing)
     return KeySet(active=active, additional=_load_additional(directory, name))
 
 

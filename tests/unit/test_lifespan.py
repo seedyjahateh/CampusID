@@ -45,7 +45,7 @@ def stubs(
     # session-scoped material, which is fine because nothing here reads it.
     monkeypatch.setattr(
         "campusid.app.load_or_create_set",
-        lambda _dir, _name, common_name: KeySet(active=sp_material),
+        lambda _dir, _name, common_name, generate_missing=True: KeySet(active=sp_material),
     )
     return engine, redis
 
