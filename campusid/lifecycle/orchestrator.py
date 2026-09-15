@@ -17,11 +17,21 @@ store is keyed on `person_uuid`: somebody who logged in through two IdPs has two
 subjects under the older key, and ending half of them is the failure this whole
 sequence exists to prevent.
 
-**A downstream target is a step with nobody in it yet.** LDAP and the portal are
-M4; the slot is here, ordered first, because putting it in later would mean
-re-deciding an order that is already the requirement. Until then the step
-records that it had nothing to do rather than being silently skipped — an empty
-step and a missing step read very differently a year later.
+**Downstream targets run at both ends, and the order differs.** A leaver is
+disabled downstream *first*: a directory that still authenticates is a way back
+in that revoking our own tokens does nothing about. A joiner is provisioned
+downstream *last*, after our own tables are written, because our state is
+authoritative and the account is a consequence of it — provisioning first would
+let an unreachable directory stop the broker recording who somebody is, and the
+retry would then have nothing to retry from.
+
+Read together: whichever step reduces what a person can reach goes first, and
+whichever step depends on state we own goes after that state exists.
+
+A deployment with no targets still runs both steps and records that they had
+nothing to do. An empty step and a missing step read very differently a year
+later, and the difference is exactly the question "did we ever create the
+directory account?".
 """
 
 from __future__ import annotations
@@ -34,12 +44,17 @@ from datetime import date
 from typing import Any, Protocol
 
 from campusid.audit.events import EventType, Outcome
+from campusid.directory.writes import PersonSpec
 from campusid.lifecycle.retry import RetriesExhausted, with_retries
 from campusid.lifecycle.rules import Delta, LifecycleRules
 from campusid.lifecycle.store import LEAVER, LifecycleStore, event_type
 from campusid.logging import get_logger
 
 log = get_logger(__name__)
+
+PROVISION_ACCOUNTS = "provision_accounts"
+"""The joiner's downstream step. Recorded like the leaver's, because "did we ever
+create the directory account?" is asked as often as its opposite."""
 
 DISABLE_ACCOUNTS = "disable_accounts"
 TERMINATE_SESSIONS = "terminate_sessions"
@@ -72,6 +87,8 @@ class ProvisioningTarget(Protocol):
     """
 
     name: str
+
+    async def provision(self, spec: PersonSpec) -> None: ...
 
     async def disable(self, login: str) -> None: ...
 
@@ -152,6 +169,13 @@ class LifecycleOrchestrator:
             await self._lifecycle.apply(
                 uuid.UUID(person_uuid), delta, before=before, after=after, source=source
             )
+            # After our own tables, and that order is deliberate. A directory
+            # outage must not stop the broker recording who somebody is: our
+            # state is authoritative and the downstream account is a
+            # consequence of it. Provisioning first would mean an unreachable
+            # directory prevented the transition from being written at all, so
+            # the retry would have nothing to retry from.
+            await self._provision_accounts(person_uuid)
             await self._invalidate_decisions(person_uuid)
             await self._record_delta(person_uuid, before, after, delta, source)
         return delta
@@ -293,6 +317,96 @@ class LifecycleOrchestrator:
         """The rules as of now, so an edit takes effect without a restart."""
         current: LifecycleRules = self._rules.current
         return current
+
+    async def _provision_accounts(self, person_uuid: str) -> None:
+        """Make sure every downstream system has an account for this person.
+
+        The mirror of `_disable_accounts`, and recorded the same way: an empty
+        step and a missing step read very differently a year later, and the
+        difference is exactly the question "did we ever create the directory
+        account?".
+
+        A failure propagates, like a disable's. The retry and dead-letter
+        machinery exists for an unreachable downstream, and a step that absorbed
+        the error would leave a person with entitlements and nowhere to use them,
+        with a trail saying they were provisioned.
+        """
+        if not self._targets:
+            await self._step(person_uuid, PROVISION_ACCOUNTS, {"targets": []})
+            return
+
+        spec = await self._spec_for(person_uuid)
+        if spec is None:
+            # Nothing downstream can be created without a login, and inventing
+            # one would be guessing at somebody else's namespace.
+            log.warning("lifecycle.no_login_for_provisioning", person_uuid=person_uuid)
+            await self._step(person_uuid, PROVISION_ACCOUNTS, {"targets": [], "reason": "no login"})
+            return
+
+        provisioned: list[str] = []
+        failed: list[str] = []
+        for target in self._targets:
+            try:
+                await with_retries(
+                    lambda target=target: target.provision(spec),  # type: ignore[misc]
+                    retry_on=self._transient,
+                    sleep=self._retry_sleep,
+                    description=f"{target.name}.provision",
+                )
+                provisioned.append(target.name)
+            except RetriesExhausted as exc:
+                if self._dead_letters is None:
+                    raise
+                await self._dead_letters.record(
+                    person_uuid=person_uuid,
+                    target=target.name,
+                    operation="provision",
+                    payload={"login": spec.uid},
+                    attempts=exc.attempts,
+                )
+                failed.append(target.name)
+
+        await self._step(
+            person_uuid,
+            PROVISION_ACCOUNTS,
+            {"targets": provisioned, "dead_lettered": failed}
+            if failed
+            else {"targets": provisioned},
+        )
+
+    async def _spec_for(self, person_uuid: str) -> PersonSpec | None:
+        """What a downstream system needs to create an entry for this person.
+
+        Returns None when there is no live ePPN, which is the one field a
+        directory entry cannot be invented without. Unlike the leaver path this
+        does *not* fall back to a released identifier: a tombstoned ePPN names
+        somebody who has left, and creating an account from one would undo the
+        deprovisioning that released it.
+        """
+        if self._identity is None:
+            return None
+
+        identifiers = await self._identity.identifiers(person_uuid)
+        login = next(
+            (row.value for row in identifiers if row.id_type == "eppn" and row.is_primary),
+            next((row.value for row in identifiers if row.id_type == "eppn"), None),
+        )
+        if login is None:
+            return None
+
+        person = await self._identity.get(person_uuid)
+        mail = next((row.value for row in identifiers if row.id_type == "mail"), None)
+        return PersonSpec(
+            uid=login.split("@", 1)[0],
+            # Empty rather than invented. A directory requires `sn` and `cn`, and
+            # a placeholder like "Unknown" is a value somebody later searches for
+            # and finds forty of.
+            given_name=(person.given_name if person else None) or "",
+            surname=(person.surname if person else None) or login.split("@", 1)[0],
+            mail=mail,
+            display_name=(person.display_name if person else None),
+            principal_name=login,
+        )
 
     async def _disable_accounts(self, person_uuid: str) -> list[str]:
         """Step one: the account in every downstream system.

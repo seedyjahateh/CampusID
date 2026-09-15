@@ -26,19 +26,42 @@ from __future__ import annotations
 from typing import Any
 
 from campusid.directory.client import DirectoryUnavailable
+from campusid.directory.writes import PersonSpec
 from campusid.logging import get_logger
 
 log = get_logger(__name__)
 
 
 class LdapTarget:
-    """The campus directory, as a deprovisioning target."""
+    """The campus directory, as a provisioning and deprovisioning target."""
 
     name = "ldap"
 
     def __init__(self, *, client: Any, writer: Any) -> None:
         self._client = client
         self._writer = writer
+
+    async def provision(self, spec: PersonSpec) -> None:
+        """Make sure this person has a directory account (FR-LC-01).
+
+        The other half of the slot, and it was empty for longer than the disable
+        half: `ensure_person` existed, was tested, and was called by nothing in
+        the application — so a joiner arriving over SCIM never reached the
+        directory at all, and NFR-PROV-01's chain had a missing link rather than
+        a slow one.
+
+        Idempotent by construction. The writer reports whether it changed
+        anything, which is what makes a re-run of a provisioning batch safe and
+        what keeps "we created this" distinguishable from "this was already
+        right" in a reconciliation report.
+        """
+        result = await self._writer.ensure_person(spec)
+        log.info(
+            "directory.provision.applied",
+            uid=spec.uid,
+            dn=result.dn,
+            created=result.changed,
+        )
 
     async def disable(self, login: str) -> None:
         """Disable this person's directory account, if they have one.
