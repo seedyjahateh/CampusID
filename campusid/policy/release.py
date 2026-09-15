@@ -4,7 +4,7 @@ What a service provider learns about a person, and why. The gate decides
 whether an assertion is genuine; this decides how much of it anyone downstream
 is entitled to see.
 
-**Default deny.** An attribute with no rule permitting it is not released. That
+**Default deny (FR-ARP-02).** An attribute with no rule permitting it is not released. That
 is the whole design: the alternative — release everything not explicitly
 forbidden — fails open every time somebody adds an attribute, and "somebody
 added an attribute" is a weekly event at a university.
@@ -14,12 +14,12 @@ Evaluation runs in a fixed order, and the order encodes the policy:
 1. **Classification.** `restricted` attributes are education records and are
    never released, by any policy, to anyone. Not overridable, because a
    disclosure cannot be undone.
-2. **FERPA suppression.** A student who has opted out (34 CFR 99.37) has their
+2. **FERPA suppression (FR-ARP-05).** A student who has opted out (34 CFR 99.37) has their
    directory information withheld from every SP that is not operating under the
    school-official exception, whatever that SP's rules say.
 3. **Explicit denial**, lowest precedence number first.
 4. **Explicit permission**, optionally filtered by value.
-5. **Entity category**, so an SP that has earned R&S needs no per-attribute
+5. **Entity category (FR-ARP-03)**, so an SP that has earned R&S needs no per-attribute
    configuration.
 6. **Deny**, because nothing above said otherwise.
 

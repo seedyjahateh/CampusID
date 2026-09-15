@@ -227,7 +227,7 @@ class UserStore:
         sort_by: str | None = None,
         descending: bool = False,
     ) -> Page:
-        """List users, filtered, sorted and paginated (FR-SCIM-07/08)."""
+        """List users, filtered, sorted and paginated (FR-SCIM-07, FR-SCIM-08)."""
         if start_index < 1:
             # §3.4.2.4: a value less than 1 is interpreted as 1 rather than
             # refused, because a client counting from zero is making an ordinary

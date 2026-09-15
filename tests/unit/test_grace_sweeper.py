@@ -51,7 +51,7 @@ async def _run_briefly(sweeper: GraceSweeper, seconds: float = 0.05) -> None:
 
 
 async def _run_until(
-    sweeper: GraceSweeper, lifecycle: _Lifecycle, calls: int, *, timeout: float = 2.0
+    sweeper: GraceSweeper, lifecycle: _Lifecycle, calls: int, *, timeout: float = 10.0
 ) -> None:
     """Run until the sweep has happened `calls` times, or give up.
 
@@ -59,6 +59,12 @@ async def _run_until(
     and waits a fixed fifty milliseconds passes on an idle machine and fails on
     a busy one, which is a flake that costs more attention than the test is
     worth.
+
+    The timeout is a give-up bound rather than a wait: the loop exits the moment
+    the calls arrive, so a generous value costs nothing on an idle machine and
+    removes the flake on a loaded one. Two seconds was not generous enough —
+    this failed once in a full-suite run on a host that was also building images,
+    and passed immediately when run alone.
     """
     sweeper.start()
     deadline = asyncio.get_running_loop().time() + timeout

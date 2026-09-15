@@ -99,6 +99,12 @@ def id_token(
     if context.nonce is not None:
         claims["nonce"] = context.nonce
     if context.acr is not None:
+        # FR-OP-13. The assurance actually achieved, carried from the session
+        # rather than from what the client asked for: a client that requested
+        # AAL2 and received a token claiming it without a second factor would be
+        # worse off than one that received a refusal. Requesting a minimum is
+        # handled where the session is, and an unmet request becomes a step-up
+        # challenge rather than a quiet downgrade.
         claims["acr"] = context.acr
     if context.amr:
         claims["amr"] = list(context.amr)

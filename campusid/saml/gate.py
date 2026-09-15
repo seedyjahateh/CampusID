@@ -358,7 +358,7 @@ class AssertionGate:
     # --- 8. destination ----------------------------------------------------
 
     def _check_destination(self, root: etree._Element) -> None:
-        """Confirm the response was addressed to our ACS URL.
+        """Confirm the response was addressed to our ACS URL (FR-SAML-06).
 
         Read from the unsigned `Response`, so this is defence in depth only.
         `SubjectConfirmationData/@Recipient` carries the same fact inside the
@@ -376,7 +376,7 @@ class AssertionGate:
     async def _consume_request(
         self, root: etree._Element, idp: TrustedIdP
     ) -> OutstandingRequest | None:
-        """Match the response to an outstanding request, and consume it.
+        """Match the response to an outstanding request, and consume it (FR-SAML-06).
 
         Runs after verification so a forged response cannot burn a real user's
         in-flight login — the same denial-of-service shape as replay poisoning.
@@ -567,6 +567,14 @@ class AssertionGate:
         return value
 
     def _name_id_format(self, assertion: etree._Element) -> str | None:
+        """The `NameID` format the IdP used (FR-SAML-09).
+
+        Recorded rather than constrained. Every format the requirement names —
+        persistent, transient, emailAddress, unspecified — is carried into the
+        session, and what the value *means* is the identity registry's question:
+        a transient identifier resolves to a person by attributes, a persistent
+        one by the scoped triple it was issued under.
+        """
         name_id = assertion.find(f"{Q_SUBJECT}/{Q_NAME_ID}")
         return name_id.get("Format") if name_id is not None else None
 

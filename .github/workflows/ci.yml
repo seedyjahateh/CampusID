@@ -45,6 +45,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.lock
       - run: pip install --require-hashes -r requirements-dev.lock
+      # FR-CI-01. The negative suite runs on every push and every pull request,
+      # with the coverage gates, so "the rejection paths are tested" is enforced
+      # rather than asserted.
+      #
       # tests/security runs here, not in the container job: the validation gate
       # is built against injectable stores precisely so the negative suite needs
       # no Postgres, no Redis and no IdP. If these ever start needing a
@@ -133,6 +137,9 @@ jobs:
   secrets-scan:
     name: Secret scan
     runs-on: ubuntu-latest
+    # FR-CI-04 and NFR-SEC-07. The full history, not the diff: a credential
+    # committed and then removed is still a credential, and scanning only the
+    # change would report the removal as clean.
     steps:
       - uses: actions/checkout@v4
         with:

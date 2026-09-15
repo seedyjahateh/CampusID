@@ -1,4 +1,4 @@
-"""Registering and resolving federation entities (FR-FED-02/03).
+"""Registering and resolving federation entities (FR-FED-02, FR-FED-03).
 
 The registry is the boundary between "a document someone uploaded" and "an
 entity this broker will accept assertions from". Registration parses and

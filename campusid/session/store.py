@@ -1,4 +1,4 @@
-"""Server-side session storage (FR-SES-01/02/03/06).
+"""Server-side session storage (FR-SES-01, FR-SES-02, FR-SES-03, FR-SES-06).
 
 Everything about a session lives in Redis; the cookie carries nothing but an
 opaque identifier. That is the requirement, and it is also what makes

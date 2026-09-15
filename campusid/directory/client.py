@@ -14,7 +14,7 @@ page. A directory with fifty thousand people answers an unpaged search by either
 truncating it silently at the server's `sizelimit` or by trying to send all of
 it; the first is worse, because the answer looks complete.
 
-**A directory outage degrades rather than fails.** FR-DIR-08: group membership is
+**A directory outage degrades rather than fails** (FR-DIR-08, NFR-AVAIL-03). Group membership is
 cached, and when the server is unreachable the cached answer is used, the session
 is marked degraded, and the fact is audited. The alternative is that a directory
 restart logs out the campus. What is *not* cached is the absence of membership —

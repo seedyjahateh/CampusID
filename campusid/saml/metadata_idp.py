@@ -1,4 +1,4 @@
-"""Parsing an IdP's metadata into something the gate can trust (FR-FED-02/03).
+"""Parsing an IdP's metadata into something the gate can trust (FR-FED-02, FR-FED-03).
 
 Metadata is the root of trust. Everything the gate later enforces — which
 certificate verifies an assertion, which endpoint the browser is sent to —
@@ -20,6 +20,15 @@ problem.
 **`validUntil` is enforced.** Metadata that never expires means a compromised
 or retired key stays trusted until a human notices, which is the failure mode
 `validUntil` exists to prevent.
+
+**A refresh that fails leaves the stored copy alone** (NFR-AVAIL-04). Parsing
+happens before anything is written, so a peer that publishes a broken document —
+or a fetch that returns a proxy error page — cannot replace a working
+registration with an unusable one. The last known-good copy stays, the operator
+is told, and logins keep working. Expiry is the one case that fails closed: a
+descriptor past its `validUntil` is refused at registration with an error naming
+the metadata, because continuing to trust a key the publisher has retired is the
+thing the field exists to stop.
 """
 
 from __future__ import annotations
