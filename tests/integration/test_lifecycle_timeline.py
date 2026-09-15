@@ -12,6 +12,7 @@ been up for a month or a minute.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date, timedelta
@@ -25,7 +26,7 @@ from campusid.db import create_engine, create_session_factory
 from campusid.identity.models import Account, Affiliation, Identifier, Person
 from campusid.lifecycle.models import EntitlementGrant, LifecycleEvent
 from campusid.lifecycle.rules import LifecycleRules, load_rules
-from campusid.lifecycle.store import LifecycleStore
+from campusid.lifecycle.store import GRACE_EXPIRY, LifecycleStore
 from campusid.scim.models import ScimSourceRecord
 
 pytestmark = pytest.mark.integration
@@ -207,6 +208,82 @@ async def test_the_grace_period_ends_whether_or_not_anybody_was_watching(
 
     assert str(person) in expired
     assert LMS not in await store.held(person, on=TODAY + timedelta(days=365))
+
+
+async def test_two_sweeps_at_once_expire_a_grant_once(
+    rules: LifecycleRules, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """The multi-node case, and the reason the selection takes a row lock.
+
+    The sweep starts in the application lifespan, so a three-node deployment runs
+    three sweeps. Without `FOR UPDATE SKIP LOCKED` both transactions select the
+    same grant, both set `revoked_at`, and both write a `grace.expiry` event.
+
+    The revocation is idempotent — the same state either way — so this is not a
+    correctness problem for access. **The timeline is not idempotent**, and a
+    duplicate expiry there is wrong in the one place an access review reads it.
+
+    The contention is forced rather than raced. An earlier version ran two sweeps
+    through `asyncio.gather` and passed with the lock removed — the two
+    transactions happened to serialise, so it proved nothing while looking like
+    proof. Here one transaction holds the row locks while the sweep runs in
+    another, which is the situation the lock exists for and is deterministic.
+    """
+    person = await _person(sessions)
+    store = LifecycleStore(sessions)
+    await store.apply(
+        person, rules.transition(set(), {"student"}, on=TODAY), before=set(), after={"student"}
+    )
+    await store.apply(
+        person,
+        rules.transition({"student"}, {"alum"}, on=TODAY),
+        before={"student"},
+        after={"alum"},
+    )
+    later = TODAY + timedelta(days=365)
+
+    async with sessions() as holder, holder.begin():
+        # Stand in for the other node: hold every due row locked.
+        locked = list(
+            await holder.scalars(
+                select(EntitlementGrant)
+                .where(
+                    EntitlementGrant.person_uuid == person,
+                    EntitlementGrant.revoked_at.is_(None),
+                    EntitlementGrant.revoke_at.is_not(None),
+                    EntitlementGrant.revoke_at <= later,
+                )
+                .with_for_update()
+            )
+        )
+        assert locked, "the fixture produced no grant inside a grace period"
+
+        # Bounded, because the regression does not fail — it *blocks*. Without
+        # `SKIP LOCKED` the sweep selects the row anyway and then waits on the
+        # holder's lock to update it, which never clears because the holder is
+        # this transaction. An unbounded await would hang CI rather than report.
+        try:
+            swept = await asyncio.wait_for(store.expire_due(on=later), timeout=10)
+        except TimeoutError:
+            pytest.fail(
+                "the sweep blocked on a row another node holds: it is selecting "
+                "locked rows instead of skipping them"
+            )
+
+    assert swept == [], "the sweep claimed a grant another node was already handling"
+
+    # And with nothing holding them, the same sweep does the work exactly once.
+    assert str(person) in await store.expire_due(on=later)
+    async with sessions() as session:
+        events = list(
+            await session.scalars(
+                select(LifecycleEvent).where(
+                    LifecycleEvent.person_uuid == person,
+                    LifecycleEvent.event_type == GRACE_EXPIRY,
+                )
+            )
+        )
+    assert len(events) == len(locked), "one expiry produced more than one timeline event"
 
 
 async def test_a_sweep_before_the_deadline_revokes_nothing(

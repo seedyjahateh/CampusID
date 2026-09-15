@@ -159,6 +159,19 @@ class LifecycleStore:
         changes what they are entitled to and something has to tell the decision
         cache whose answers just went stale (FR-AZ-08). A count would leave the
         sweep unable to say whose.
+
+        **Rows are locked and contended ones skipped**, because the sweep runs in
+        the application lifespan and therefore once per node. Without the lock,
+        two nodes select the same grant, both set `revoked_at`, and both write a
+        `grace.expiry` event — the revocation is idempotent and the *timeline* is
+        not, so a person's history gains a duplicate in the one place an access
+        review reads it.
+
+        `SKIP LOCKED` rather than waiting: a node that finds a grant already
+        being handled should move to the next one, not block until the other
+        node commits. That turns the redundancy into parallelism instead of into
+        a queue, and it is why this is a row lock rather than an advisory lock
+        around the whole sweep.
         """
         today = on or date.today()
         expired: list[str] = []
@@ -166,11 +179,13 @@ class LifecycleStore:
         async with self._sessions() as session, session.begin():
             due = list(
                 await session.scalars(
-                    select(EntitlementGrant).where(
+                    select(EntitlementGrant)
+                    .where(
                         EntitlementGrant.revoked_at.is_(None),
                         EntitlementGrant.revoke_at.is_not(None),
                         EntitlementGrant.revoke_at <= today,
                     )
+                    .with_for_update(skip_locked=True)
                 )
             )
             for grant in due:
