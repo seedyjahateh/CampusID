@@ -28,12 +28,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from campusid.audit.chain import GENESIS
+from campusid.audit.events import EventType, Outcome
 from campusid.audit.models import AuditEventRecord, AuditRetentionAnchor
 from campusid.logging import get_logger
 
@@ -109,6 +110,7 @@ class RetentionStore:
     async def prune(
         self,
         *,
+        audit: Any,
         older_than: timedelta = DEFAULT_RETENTION,
         sink: Sink,
         performed_by: str,
@@ -121,6 +123,14 @@ class RetentionStore:
         The boundary row is chosen first and the delete is keyed on its sequence,
         so an event written afterwards with an old timestamp cannot slip inside
         the window and be removed without an anchor covering it.
+
+        `audit` is required rather than optional, and that is the point of it
+        being a parameter at all. The pass records itself in the trail it just
+        shortened, so the surviving events carry their own explanation for where
+        they begin — and a guarantee that depended on the caller remembering
+        would hold for one caller and silently not for the next. It was written
+        by the operator script until now, which meant a trail pruned by any other
+        path began with no explanation at all.
         """
         moment = now or datetime.now(UTC)
         cutoff = moment - older_than
@@ -148,6 +158,20 @@ class RetentionStore:
                     reason=reason,
                 )
             )
+
+        # After the delete, deliberately. Written before it, the event would be
+        # inside the window it describes and removed by the pass that wrote it.
+        await audit.record(
+            EventType.AUDIT_PRUNED,
+            Outcome.SUCCESS,
+            actor=performed_by,
+            reason=reason,
+            detail={
+                "removed": exported,
+                "through_seq": through_seq,
+                "cutoff": cutoff.isoformat(),
+            },
+        )
 
         log.info(
             "audit.retention.pruned",

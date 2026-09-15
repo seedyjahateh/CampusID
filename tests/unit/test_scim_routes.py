@@ -23,6 +23,7 @@ from fakeredis import aioredis
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from campusid.audit.events import EventType, Outcome
 from campusid.oidc.clients import ClientType, OidcClient, hash_secret
 from campusid.oidc.errors import INVALID_CLIENT, OAuthError
 from campusid.oidc.grants import GrantStore
@@ -30,6 +31,7 @@ from campusid.oidc.keys import KeySet
 from campusid.scim.errors import ScimError, ScimType, duplicate, not_found, version_mismatch
 from campusid.scim.schemas import CORE_GROUP, CORE_USER
 from campusid.scim.store import Page
+from tests.support.audit import RecordingAuditLog
 
 BASE = "https://broker.test"
 CLIENT_ID = "campus-sis"
@@ -89,6 +91,11 @@ class _Recorder:
         self.resource = resource
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.raises: ScimError | None = None
+        self.created = True
+        """Whether a create made a new resource or found one a replayed request
+        already made. The real store decides this from `externalId`; here it is a
+        switch, because what is under test is the route's response to the answer
+        rather than how the answer was reached."""
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -99,7 +106,7 @@ class _Recorder:
 class _Users(_Recorder):
     async def create(self, parsed: Any, raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         self._record("create", parsed, raw)
-        return self.resource, True
+        return self.resource, self.created
 
     async def get(self, resource_id: str) -> dict[str, Any]:
         self._record("get", resource_id)
@@ -124,7 +131,7 @@ class _Users(_Recorder):
 class _Groups(_Recorder):
     async def create(self, document: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         self._record("create", document)
-        return self.resource, True
+        return self.resource, self.created
 
     async def get(self, group_id: str, **kwargs: Any) -> dict[str, Any]:
         self._record("get", group_id, **kwargs)
@@ -528,3 +535,97 @@ async def test_a_group_too_large_to_scan_surfaces_as_too_many(
 
     assert response.status_code == 400
     assert response.json()["scimType"] == ScimType.TOO_MANY
+
+
+# --- provisioning is audited (NFR-OBS-01) -----------------------------------
+#
+# These events are the route's own, not the lifecycle hook's. That hook fires
+# only when an affiliation actually moved, so a create for somebody with no
+# affiliations yet and a correction to a display name used to produce no audit
+# record at all. Every write now leaves one naming the client that made it.
+
+
+def _provisioning(audit: RecordingAuditLog) -> list[Any]:
+    """Only the provisioning events. The token this test fetched to authenticate
+    itself writes one of its own, which would otherwise be counted."""
+    return [
+        event
+        for event in audit.events
+        if event.event_type
+        in (
+            EventType.PROVISIONING_CREATED,
+            EventType.PROVISIONING_UPDATED,
+            EventType.PROVISIONING_DELETED,
+        )
+    ]
+
+
+async def test_creating_a_person_is_audited(http: AsyncClient, audit: RecordingAuditLog) -> None:
+    await http.post("/scim/v2/Users", json=dict(USER), headers=await _headers(http))
+
+    (event,) = _provisioning(audit)
+    assert event.event_type is EventType.PROVISIONING_CREATED
+    assert event.actor == CLIENT_ID
+    assert event.target == f"User/{USER['id']}"
+
+
+async def test_a_replayed_create_is_audited_as_an_update(
+    http: AsyncClient, users: _Users, audit: RecordingAuditLog
+) -> None:
+    """The person already existed. A trail saying they were created twice would
+    answer "when was this account made" with two dates."""
+    users.created = False
+
+    await http.post("/scim/v2/Users", json=dict(USER), headers=await _headers(http))
+
+    (event,) = _provisioning(audit)
+    assert event.event_type is EventType.PROVISIONING_UPDATED
+    assert event.detail["replayed"] is True
+
+
+async def test_deprovisioning_a_person_is_audited(
+    http: AsyncClient, audit: RecordingAuditLog
+) -> None:
+    await http.delete(f"/scim/v2/Users/{USER['id']}", headers=await _headers(http))
+
+    (event,) = _provisioning(audit)
+    assert event.event_type is EventType.PROVISIONING_DELETED
+    assert event.target == f"User/{USER['id']}"
+
+
+async def test_a_group_write_is_audited(http: AsyncClient, audit: RecordingAuditLog) -> None:
+    """A group here grants entitlements, so changing its membership is a grant
+    and is exactly the write an access review asks about."""
+    await http.patch(
+        f"/scim/v2/Groups/{GROUP['id']}",
+        json={
+            "schemas": [PATCH_OP],
+            "Operations": [{"op": "replace", "path": "displayName", "value": "Staff"}],
+        },
+        headers=await _headers(http),
+    )
+
+    (event,) = _provisioning(audit)
+    assert event.event_type is EventType.PROVISIONING_UPDATED
+    assert event.target == f"Group/{GROUP['id']}"
+
+
+async def test_a_write_refused_for_want_of_scope_is_audited(
+    http: AsyncClient, audit: RecordingAuditLog
+) -> None:
+    """A denial is an outcome. A provisioning client whose every request is 403
+    has a misconfiguration nobody will notice from its side at three in the
+    morning, and the trail is where somebody would look."""
+    await http.post("/scim/v2/Users", json=dict(USER), headers=await _headers(http, "scim:read"))
+
+    (event,) = _provisioning(audit)
+    assert event.outcome is Outcome.DENIED
+    assert event.actor is None, "the token is exactly what was not accepted"
+
+
+async def test_a_read_is_not_audited(http: AsyncClient, audit: RecordingAuditLog) -> None:
+    """A read is none of the three outcomes the requirement names, and a trail
+    carrying every listing is one nobody can find a write in."""
+    await http.get("/scim/v2/Users", headers=await _headers(http, "scim:read"))
+
+    assert _provisioning(audit) == []

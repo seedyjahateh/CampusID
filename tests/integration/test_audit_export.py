@@ -166,7 +166,7 @@ async def test_nothing_old_enough_is_a_no_op(retention: RetentionStore, audit: A
     await _emit(audit, 3, at=NOW)
 
     pruned = await retention.prune(
-        sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
     )
 
     assert pruned.removed == 0
@@ -184,13 +184,58 @@ async def test_old_events_are_removed(
     await _emit(audit, 2, at=NOW)
 
     pruned = await retention.prune(
-        sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
     )
 
     assert pruned.removed == 3
     async with sessions() as session:
         remaining = list(await session.scalars(select(AuditEventRecord)))
-    assert len(remaining) == 2
+    # The two survivors, plus the record of the pass itself.
+    assert len(remaining) == 3
+    assert remaining[-1].event_type == EventType.AUDIT_PRUNED
+
+
+async def test_the_pass_records_itself_in_the_trail_it_shortened(
+    retention: RetentionStore, audit: AuditLog, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """So the surviving events carry their own explanation for where they begin.
+
+    Written by `prune` rather than by whoever calls it. It used to be written by
+    the operator script, which made it a guarantee that held for one caller and
+    silently not for any other — including every test in this file, none of which
+    noticed.
+
+    After the delete, deliberately: written before it, the event would be inside
+    the window it describes and removed by the pass that wrote it.
+    """
+    await _emit(audit, 3, at=NOW - timedelta(days=500))
+
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="marcus.reed", reason="quarterly", now=NOW
+    )
+
+    async with sessions() as session:
+        rows = list(await session.scalars(select(AuditEventRecord)))
+    (recorded,) = [row for row in rows if row.event_type == EventType.AUDIT_PRUNED]
+    assert recorded.actor == "marcus.reed"
+    assert recorded.reason == "quarterly"
+    assert recorded.detail["removed"] == 3
+
+
+async def test_a_no_op_pass_records_nothing(
+    retention: RetentionStore, audit: AuditLog, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """A pass that removed nothing has nothing to explain, and an event per
+    scheduled run that did nothing is how a trail becomes unreadable."""
+    await _emit(audit, 2, at=NOW)
+
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+    )
+
+    async with sessions() as session:
+        rows = list(await session.scalars(select(AuditEventRecord)))
+    assert [row for row in rows if row.event_type == EventType.AUDIT_PRUNED] == []
 
 
 async def test_everything_removed_is_exported_first(
@@ -205,7 +250,9 @@ async def test_everything_removed_is_exported_first(
     async def sink(rows: list[AuditEventRecord]) -> None:
         seen.extend(row.event_id for row in rows)
 
-    await retention.prune(sink=sink, performed_by="operator", reason="routine", now=NOW)
+    await retention.prune(
+        audit=audit, sink=sink, performed_by="operator", reason="routine", now=NOW
+    )
 
     assert len(seen) == 4
 
@@ -219,7 +266,9 @@ async def test_a_failing_export_leaves_the_trail_alone(
         raise OSError("the disk is full")
 
     with pytest.raises(OSError, match="disk is full"):
-        await retention.prune(sink=broken, performed_by="operator", reason="routine", now=NOW)
+        await retention.prune(
+            audit=audit, sink=broken, performed_by="operator", reason="routine", now=NOW
+        )
 
     async with sessions() as session:
         assert len(list(await session.scalars(select(AuditEventRecord)))) == 3
@@ -229,6 +278,7 @@ async def test_the_window_is_configurable(retention: RetentionStore, audit: Audi
     await _emit(audit, 3, at=NOW - timedelta(days=10))
 
     pruned = await retention.prune(
+        audit=audit,
         older_than=timedelta(days=5),
         sink=_nowhere,
         performed_by="operator",
@@ -265,7 +315,9 @@ async def test_a_pruned_trail_still_verifies(retention: RetentionStore, audit: A
     await _emit(audit, 4, at=NOW - timedelta(days=500))
     await _emit(audit, 3, at=NOW)
 
-    await retention.prune(sink=_nowhere, performed_by="operator", reason="routine", now=NOW)
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+    )
 
     assert await audit.verify_chain() is None
 
@@ -279,7 +331,7 @@ async def test_the_anchor_records_what_was_cut(
     await _emit(audit, 1, at=NOW)
 
     await retention.prune(
-        sink=_nowhere, performed_by="marcus.reed", reason="quarterly pass", now=NOW
+        audit=audit, sink=_nowhere, performed_by="marcus.reed", reason="quarterly pass", now=NOW
     )
 
     async with sessions() as session:
@@ -297,7 +349,9 @@ async def test_deleting_beyond_the_anchor_is_still_caught(
     A row taken out afterwards breaks the link like any other."""
     await _emit(audit, 3, at=NOW - timedelta(days=500))
     await _emit(audit, 3, at=NOW)
-    await retention.prune(sink=_nowhere, performed_by="operator", reason="routine", now=NOW)
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+    )
 
     async with sessions() as session, session.begin():
         oldest = await session.scalar(
@@ -317,7 +371,9 @@ async def test_editing_a_surviving_row_is_still_caught(
 ) -> None:
     await _emit(audit, 2, at=NOW - timedelta(days=500))
     await _emit(audit, 3, at=NOW)
-    await retention.prune(sink=_nowhere, performed_by="operator", reason="routine", now=NOW)
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+    )
 
     async with sessions() as session, session.begin():
         await session.execute(text("UPDATE audit_event SET subject = 'tampered'"))
@@ -333,10 +389,20 @@ async def test_two_passes_chain_their_anchors(retention: RetentionStore, audit: 
     await _emit(audit, 2, at=NOW)
 
     await retention.prune(
-        older_than=timedelta(days=700), sink=_nowhere, performed_by="op", reason="first", now=NOW
+        audit=audit,
+        older_than=timedelta(days=700),
+        sink=_nowhere,
+        performed_by="op",
+        reason="first",
+        now=NOW,
     )
     await retention.prune(
-        older_than=timedelta(days=400), sink=_nowhere, performed_by="op", reason="second", now=NOW
+        audit=audit,
+        older_than=timedelta(days=400),
+        sink=_nowhere,
+        performed_by="op",
+        reason="second",
+        now=NOW,
     )
 
     assert await audit.verify_chain() is None
@@ -349,7 +415,9 @@ async def test_a_trail_pruned_to_nothing_reports_the_anchor_as_its_head(
     trail somebody had emptied would look like."""
     await _emit(audit, 3, at=NOW - timedelta(days=500))
 
-    await retention.prune(sink=_nowhere, performed_by="operator", reason="routine", now=NOW)
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+    )
 
     assert await audit.chain_head() != GENESIS
 
@@ -358,7 +426,9 @@ async def test_events_written_after_a_pass_continue_the_chain(
     retention: RetentionStore, audit: AuditLog
 ) -> None:
     await _emit(audit, 2, at=NOW - timedelta(days=500))
-    await retention.prune(sink=_nowhere, performed_by="operator", reason="routine", now=NOW)
+    await retention.prune(
+        audit=audit, sink=_nowhere, performed_by="operator", reason="routine", now=NOW
+    )
 
     await _emit(audit, 2, at=NOW)
 

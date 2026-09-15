@@ -18,6 +18,8 @@ from typing import Any, Final
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
+from campusid.audit.events import EventType, Outcome
+from campusid.oidc.bearer import BearerToken
 from campusid.scim.auth import SCOPE_READ, SCOPE_WRITE, challenge, require_scope
 from campusid.scim.bulk import parse_bulk
 from campusid.scim.bulk_runner import BulkRunner, payload_too_large
@@ -125,6 +127,56 @@ async def get_schema(request: Request, schema_id: str) -> JSONResponse:
 # --- /Users -----------------------------------------------------------------
 
 
+async def _written(
+    request: Request,
+    event: EventType,
+    token: BearerToken,
+    target: str,
+    **detail: Any,
+) -> None:
+    """Record a successful write (NFR-OBS-01).
+
+    Separate from the lifecycle events the store's transition hook emits, and
+    both are needed. Those say what a change *meant* and are written only when an
+    affiliation actually moved; this says a write *happened*, which is the only
+    record of a create for somebody with no affiliations yet or a correction to a
+    display name. Without it those produce no audit trail at all.
+
+    The actor is the provisioning client, not a person. An SIS runs at three in
+    the morning and there is nobody logged in, so "who did this" can only ever
+    mean which credential was used — which is also the thing that gets
+    compromised.
+    """
+    await request.app.state.audit.record(
+        event,
+        Outcome.SUCCESS,
+        actor=token.client_id,
+        target=target,
+        detail=detail,
+    )
+
+
+async def _refused(request: Request, event: EventType, target: str, exc: ScimError) -> None:
+    """Record a write that was turned away.
+
+    A refused write is an outcome. A provisioning client whose every request is
+    403 has a misconfiguration nobody will notice from the client's side at three
+    in the morning, and one whose requests are 401 may not be the client at all.
+
+    `DENIED` rather than `FAILURE` for the authorization statuses, because the
+    two mean opposite things to whoever reads the trail: a denial is the system
+    working and a failure is the system not working, or being attacked. No actor
+    is recorded — the caller's token is exactly what was not accepted.
+    """
+    await request.app.state.audit.record(
+        event,
+        Outcome.DENIED if exc.status in (401, 403) else Outcome.FAILURE,
+        target=target,
+        reason=exc.scim_type or str(exc.status),
+        detail={"status": exc.status},
+    )
+
+
 def _error(exc: ScimError) -> JSONResponse:
     """The one way this API reports a failure (FR-SCIM-12)."""
     return JSONResponse(
@@ -154,12 +206,23 @@ def _resource(body: dict[str, Any], status: int = 200) -> JSONResponse:
 async def create_user(request: Request) -> JSONResponse:
     """Create a person (FR-SCIM-02), idempotently on `externalId` (FR-SCIM-14)."""
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         raw = await _body(request)
         resource, created = await request.app.state.scim_users.create(from_scim(raw), raw)
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_CREATED, "User", exc)
         return _error(exc)
 
+    # A replay is recorded as an update rather than a create, because the person
+    # already existed and a trail saying they were created twice would be
+    # answering "when was this account made" with two dates.
+    await _written(
+        request,
+        EventType.PROVISIONING_CREATED if created else EventType.PROVISIONING_UPDATED,
+        token,
+        f"User/{resource['id']}",
+        replayed=not created,
+    )
     # 201 for a new person, 200 for a replay. The status is the only thing
     # telling a retrying client whether its first attempt landed.
     return _resource(resource, 201 if created else 200)
@@ -224,14 +287,16 @@ async def get_user(request: Request, resource_id: str) -> Response:
 async def replace_user(request: Request, resource_id: str) -> JSONResponse:
     """Replace a person (FR-SCIM-04)."""
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         raw = await _body(request)
         resource = await request.app.state.scim_users.replace(
             resource_id, from_scim(raw), raw, if_match=request.headers.get("if-match")
         )
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_UPDATED, f"User/{resource_id}", exc)
         return _error(exc)
 
+    await _written(request, EventType.PROVISIONING_UPDATED, token, f"User/{resource_id}")
     return _resource(resource)
 
 
@@ -246,18 +311,23 @@ async def patch_user(request: Request, resource_id: str) -> JSONResponse:
     The result is written back through the ordinary replace path.
     """
     store = request.app.state.scim_users
+    target = f"User/{resource_id}"
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         current = await store.get(resource_id)
         patched = apply_patch(current, parse_operations(await _body(request)))
         resource = await store.apply_patched(
             resource_id, from_scim(patched), patched, if_match=request.headers.get("if-match")
         )
     except PatchError as exc:
-        return _error(ScimError(400, str(exc), exc.scim_type))
+        malformed = ScimError(400, str(exc), exc.scim_type)
+        await _refused(request, EventType.PROVISIONING_UPDATED, target, malformed)
+        return _error(malformed)
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_UPDATED, target, exc)
         return _error(exc)
 
+    await _written(request, EventType.PROVISIONING_UPDATED, token, target, patched=True)
     return _resource(resource)
 
 
@@ -270,13 +340,15 @@ async def delete_user(request: Request, resource_id: str) -> Response:
     anybody else.
     """
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         await request.app.state.scim_users.soft_delete(
             resource_id, if_match=request.headers.get("if-match")
         )
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_DELETED, f"User/{resource_id}", exc)
         return _error(exc)
 
+    await _written(request, EventType.PROVISIONING_DELETED, token, f"User/{resource_id}")
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
@@ -300,11 +372,19 @@ def _wants_members(request: Request) -> bool:
 async def create_group(request: Request) -> JSONResponse:
     """Create a group (FR-SCIM-11)."""
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         resource, created = await request.app.state.scim_groups.create(await _body(request))
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_CREATED, "Group", exc)
         return _error(exc)
 
+    await _written(
+        request,
+        EventType.PROVISIONING_CREATED if created else EventType.PROVISIONING_UPDATED,
+        token,
+        f"Group/{resource['id']}",
+        replayed=not created,
+    )
     return _resource(resource, 201 if created else 200)
 
 
@@ -373,13 +453,15 @@ async def replace_group(request: Request, group_id: str) -> JSONResponse:
     for why. An explicit empty array still clears it.
     """
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         resource = await request.app.state.scim_groups.replace(
             group_id, await _body(request), if_match=request.headers.get("if-match")
         )
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_UPDATED, f"Group/{group_id}", exc)
         return _error(exc)
 
+    await _written(request, EventType.PROVISIONING_UPDATED, token, f"Group/{group_id}")
     return _resource(resource)
 
 
@@ -393,17 +475,26 @@ async def patch_group(request: Request, group_id: str) -> JSONResponse:
     operations become row-level writes and the rest is a short attribute
     mapping.
     """
+    target = f"Group/{group_id}"
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         operations = parse_operations(await _body(request))
         resource = await request.app.state.scim_groups.patch(
             group_id, operations, if_match=request.headers.get("if-match")
         )
     except PatchError as exc:
-        return _error(ScimError(400, str(exc), exc.scim_type))
+        malformed = ScimError(400, str(exc), exc.scim_type)
+        await _refused(request, EventType.PROVISIONING_UPDATED, target, malformed)
+        return _error(malformed)
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_UPDATED, target, exc)
         return _error(exc)
 
+    # A membership change is the reason a group write is worth auditing at all:
+    # a group here grants entitlements, so adding somebody to one is a grant.
+    await _written(
+        request, EventType.PROVISIONING_UPDATED, token, target, operations=len(operations)
+    )
     return _resource(resource)
 
 
@@ -416,13 +507,18 @@ async def delete_group(request: Request, group_id: str) -> Response:
     unusable for whatever replaces it.
     """
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         await request.app.state.scim_groups.delete(
             group_id, if_match=request.headers.get("if-match")
         )
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_DELETED, f"Group/{group_id}", exc)
         return _error(exc)
 
+    # The one write here with no undo. A person's delete is soft and their
+    # identifiers are tombstoned; a group is gone, and with it the record of who
+    # was in it, so this event is the only thing left that says it existed.
+    await _written(request, EventType.PROVISIONING_DELETED, token, f"Group/{group_id}")
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
@@ -443,7 +539,7 @@ async def bulk(request: Request) -> JSONResponse:
     entries, not the envelope.
     """
     try:
-        await require_scope(request, SCOPE_WRITE)
+        token = await require_scope(request, SCOPE_WRITE)
         body = await _bulk_body(request)
         parsed = parse_bulk(body)
         runner = BulkRunner(
@@ -453,8 +549,24 @@ async def bulk(request: Request) -> JSONResponse:
         )
         response = await runner.run(parsed)
     except ScimError as exc:
+        await _refused(request, EventType.PROVISIONING_UPDATED, "Bulk", exc)
         return _error(exc)
 
+    # One event for the envelope, carrying how many operations it held and how
+    # many the runner refused. The operations inside it bypass the handlers
+    # above, so this is their only route-level record; a change that moved
+    # somebody's affiliation is separately recorded as a lifecycle event by the
+    # store's transition hook. What the envelope adds is that they arrived
+    # together, from one client, in one request — which is the shape of a bulk
+    # mistake and is invisible from the individual records.
+    await _written(
+        request,
+        EventType.PROVISIONING_UPDATED,
+        token,
+        "Bulk",
+        operations=len(parsed.operations),
+        failed=sum(1 for entry in response.get("Operations", []) if int(entry["status"]) >= 400),
+    )
     return JSONResponse(
         response, media_type=SCIM_CONTENT_TYPE, headers={"Cache-Control": "no-store"}
     )

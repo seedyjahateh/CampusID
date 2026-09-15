@@ -24,6 +24,7 @@ from fakeredis import aioredis
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from campusid.audit.events import EventType
 from campusid.oidc.clients import ClientType, OidcClient, hash_secret
 from campusid.oidc.errors import OAuthError
 from campusid.oidc.grants import GrantStore
@@ -35,6 +36,7 @@ from campusid.policy.attributes import MAIL
 from campusid.policy.release import ReleasePolicy, ReleaseRule
 from campusid.session.cookies import SESSION_COOKIE
 from campusid.session.store import Session, SessionStore
+from tests.support.audit import RecordingAuditLog
 
 pytestmark = pytest.mark.security
 
@@ -360,6 +362,26 @@ async def test_a_failing_delivery_is_retried(
     await http.get("/oauth2/logout", cookies={SESSION_COOKIE: session.sid})
 
     assert backchannel.attempts[BROKEN_LOGOUT] == 3
+
+
+async def test_a_delivery_that_never_succeeds_is_audited(
+    http: AsyncClient, session: Session, backchannel: _Backchannel, audit: RecordingAuditLog
+) -> None:
+    """The failure is recorded rather than raised, and that is the whole design.
+
+    A client that cannot be reached must not stop the logout: the session is
+    already gone here and every other client has been told. But a client whose
+    users stay signed in after logging out everywhere else is a security problem
+    somebody has to be able to find, and a log line is not where anybody looks
+    for it (NFR-OBS-01).
+    """
+    await _sign_in_to(http, session, BROKEN, BROKEN_REDIRECT)
+
+    await http.get("/oauth2/logout", cookies={SESSION_COOKIE: session.sid})
+
+    failures = audit.of_type(EventType.LOGOUT_DELIVERY_FAILED)
+    assert failures, "a back-channel logout that never landed produced no audit event"
+    assert failures[0].target == BROKEN
 
 
 async def test_a_successful_delivery_is_not_retried(

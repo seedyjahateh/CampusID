@@ -27,7 +27,6 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-from campusid.audit.events import EventType, Outcome
 from campusid.audit.log import AuditLog
 from campusid.audit.models import AuditEventRecord
 from campusid.audit.query import as_json
@@ -100,27 +99,17 @@ async def main(argv: list[str] | None = None) -> int:
                 # way.
                 handle.flush()
 
+            # The pass records itself in the trail it just shortened, so the
+            # surviving events carry their own explanation for where they begin.
+            # That now happens inside `prune` rather than here: written at this
+            # level it was a guarantee that held for this caller and silently not
+            # for any other.
             pruned = await retention.prune(
+                audit=audit,
                 older_than=window,
                 sink=sink,
                 performed_by=options.by,
                 reason=options.reason.strip(),
-            )
-
-        if pruned.anchored:
-            # The pass records itself in the trail it just shortened, so the
-            # surviving events carry their own explanation for where they begin.
-            await audit.record(
-                EventType.AUDIT_PRUNED,
-                Outcome.SUCCESS,
-                actor=options.by,
-                reason=options.reason.strip(),
-                detail={
-                    "removed": pruned.removed,
-                    "through_seq": pruned.through_seq,
-                    "export": str(destination),
-                    "retention_days": options.days,
-                },
             )
 
         broken = await audit.verify_chain()

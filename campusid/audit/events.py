@@ -82,6 +82,30 @@ class EventType(StrEnum):
     """FR-ARP-06 and FERPA §99.32. Every attribute considered, released or not,
     with the rule that decided it."""
 
+    # --- provisioning --------------------------------------------------------
+    PROVISIONING_CREATED = "provisioning.created"
+    PROVISIONING_UPDATED = "provisioning.updated"
+    PROVISIONING_DELETED = "provisioning.deleted"
+    """Every write through the SCIM API, by the client that made it.
+
+    Distinct from the lifecycle events below, and both are needed. Those record
+    what a change *meant* — somebody became a student, somebody left — and are
+    written only when a transition actually occurred. These record that a write
+    *happened*, whether or not it changed an affiliation.
+
+    Without them a SCIM update that corrects a display name, or a create for
+    somebody with no affiliations yet, produces no audit record at all: the
+    lifecycle hook returns early when `before == after`. NFR-OBS-01 asks for
+    100% of provisioning outcomes, and "the write that changed nothing
+    consequential" is still an outcome — it is how a record came to say what it
+    says, and it names the client that said it.
+
+    Three types rather than one with an operation field, for the reason the
+    lifecycle ones are three: "who created accounts last night" and "what was
+    deleted last night" are different questions, and the second is the one
+    somebody asks in a hurry.
+    """
+
     # --- lifecycle ----------------------------------------------------------
     LIFECYCLE_JOINER = "lifecycle.joiner"
     LIFECYCLE_MOVER = "lifecycle.mover"
@@ -132,7 +156,19 @@ class EventType(StrEnum):
 
     # --- administration -----------------------------------------------------
     ADMIN_ACTION = "admin.action"
-    CONFIG_CHANGE = "config.change"
+    """Every administrative change, with what was done in `detail.action` and
+    why in `reason`. One type rather than one per action, unlike the lifecycle
+    and provisioning families: an investigation into administrative activity
+    reads the lot and filters afterwards, where a deprovisioning investigation
+    starts already knowing which transition it is about.
+
+    There was a `config.change` here too, declared and emitted by nothing. An
+    enum member no code writes is a promise the trail does not keep — a dashboard
+    could filter on it forever and see an empty chart — so it is gone rather than
+    retrofitted onto the entity endpoints, which are administrative actions and
+    already recorded as such.
+    """
+
     LOGOUT_DELIVERY_FAILED = "logout.delivery_failed"
 
 

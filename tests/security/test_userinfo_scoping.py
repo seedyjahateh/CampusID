@@ -21,6 +21,7 @@ from fakeredis import aioredis
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from campusid.audit.events import EventType
 from campusid.oidc.clients import ClientType, OidcClient, hash_secret
 from campusid.oidc.errors import OAuthError
 from campusid.oidc.grants import GrantStore
@@ -31,6 +32,7 @@ from campusid.policy.attributes import DISPLAY_NAME, EPPN, MAIL, SCOPED_AFFILIAT
 from campusid.policy.release import ReleasePolicy, ReleaseRule, Subject, evaluate
 from campusid.session.cookies import SESSION_COOKIE
 from campusid.session.store import Session, SessionStore
+from tests.support.audit import RecordingAuditLog
 
 pytestmark = pytest.mark.security
 
@@ -485,6 +487,28 @@ async def test_revoking_a_refresh_token_ends_the_family(
         },
     )
     assert refreshed.status_code == 400
+
+
+async def test_a_revocation_is_audited(
+    http: AsyncClient, session: Session, audit: RecordingAuditLog
+) -> None:
+    """A credential being destroyed is an outcome worth recording (NFR-OBS-01).
+
+    A client calling this at logout is the ordinary case, and a client calling it
+    for a token nobody expected it to hold is the interesting one — neither is
+    distinguishable afterwards from the tokens themselves, because the whole
+    point of the operation is that they stop existing.
+    """
+    tokens = await _tokens(http, session)
+
+    await http.post(
+        "/oauth2/revoke",
+        data={"token": tokens["refresh_token"], "client_id": CLIENT_ID, "client_secret": SECRET},
+    )
+
+    revocations = audit.of_type(EventType.TOKEN_REVOKED)
+    assert revocations, "a revocation produced no audit event"
+    assert revocations[-1].target == CLIENT_ID
 
 
 async def test_a_wrong_type_hint_does_not_prevent_revocation(

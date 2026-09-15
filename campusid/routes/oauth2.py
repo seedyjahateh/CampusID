@@ -397,9 +397,29 @@ async def pushed_authorization_request(
         client.validated_redirect_uri(redirect_uri)
         _check_authorization_request(client, parameters)
     except OAuthError as exc:
+        # A refused push is an authentication outcome and was previously only a
+        # log line (NFR-OBS-01). This is where a client's credentials are
+        # checked, so a run of failures here is either a misconfigured
+        # integration or somebody guessing a client secret, and neither is
+        # visible from the authorization endpoint.
+        await state_.audit.record(
+            EventType.AUTHZ_DENIED,
+            Outcome.DENIED,
+            target=client_id,
+            reason=exc.reason.value,
+            **_provenance(request),
+        )
         return _token_error(exc)
 
     reference, expires_in = await state_.pushed_requests.push(client.client_id, parameters)
+    await state_.audit.record(
+        EventType.AUTHZ_CODE_ISSUED,
+        Outcome.SUCCESS,
+        actor=client.client_id,
+        target=client.client_id,
+        detail={"pushed": True, "expires_in": expires_in},
+        **_provenance(request),
+    )
     log.info("oidc.par.pushed", client_id=client.client_id)
     return JSONResponse(
         {"request_uri": reference, "expires_in": expires_in},
