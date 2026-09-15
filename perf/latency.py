@@ -73,6 +73,18 @@ class Run:
         return statistics.fmean(self.samples)
 
 
+def seconds(value: float) -> str:
+    """A duration with enough precision to be a number rather than a zero.
+
+    Three decimals is right for a request and wrong for an in-process function
+    call: an authorization decision taking 40 microseconds renders as `0.000`,
+    which a reader takes for a broken harness rather than a fast one. Anything
+    under a millisecond gets six decimals, which is the point at which the figure
+    starts meaning something again.
+    """
+    return f"{value:.3f}" if value >= 0.001 else f"{value:.6f}"
+
+
 def _at(ordered: Sequence[float], name: str, fraction: float) -> Percentile:
     """The nearest-rank percentile.
 
@@ -114,11 +126,11 @@ def render(run: Run, *, target: dict[str, float]) -> str:
         verdict = "—" if limit is None else ("pass" if percentile.seconds < limit else "FAIL")
         shown = "—" if limit is None else f"< {limit:g}s"
         lines.append(
-            f"| {percentile.name} | {percentile.seconds:.3f} | "
+            f"| {percentile.name} | {seconds(percentile.seconds)} | "
             f"{percentile.rank} of {len(run.samples)} | {shown} | {verdict} |"
         )
     lines += [
-        f"| mean | {run.mean:.3f} | — | — | — |",
+        f"| mean | {seconds(run.mean)} | — | — | — |",
         "",
         "## Reading this",
         "",
@@ -134,6 +146,21 @@ def render(run: Run, *, target: dict[str, float]) -> str:
         "hardware, and are not a capacity statement.",
     ]
     return "\n".join(lines) + "\n"
+
+
+def render_all(title: str, runs: list[tuple[Run, dict[str, float]]], *, preamble: str) -> str:
+    """Several runs in one report.
+
+    The four latency budgets share a stack, a host and a moment, so splitting
+    them across four files would invite somebody to compare a token-endpoint
+    figure taken this morning against an authorization figure taken while the
+    machine was building images. One file, one run, one set of conditions.
+    """
+    lines = [f"# {title}", "", preamble, ""]
+    for run, target in runs:
+        lines.append(render(run, target=target).replace("# ", "## ", 1))
+        lines.append("")
+    return "\n".join(lines)
 
 
 def failed(run: Run, *, target: dict[str, float]) -> list[str]:

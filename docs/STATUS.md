@@ -28,13 +28,15 @@ would have been caught by a citation scan. Treat the table below as a floor.
 
 | Figure | Result |
 |---|---|
-| Unit and security tests | 2233 passing |
+| Unit and security tests | 2238 passing |
 | Integration tests | 374 passing, including a live Keycloak login and a live OpenLDAP tree |
 | Coverage, overall | 85.66% against an 85% gate |
 | Coverage, `campusid/saml` | 95.56% against a 95% gate |
 | Provisioning latency p95 | 0.221s against a 30s target ([report](perf/provisioning-latency-2026-09-15.md)) |
 | Deprovisioning latency p95 | 0.266s against a 15s target ([report](perf/deprovisioning-latency-2026-09-15.md)) |
 | Dependency audit | no known vulnerabilities, hash-pinned |
+| Token endpoint p95 | 0.035s against a 0.15s target ([report](perf/latency-budgets-2026-09-15.md)) |
+| Authorization decision p95 | 6 microseconds against a 50ms target |
 
 ---
 
@@ -112,14 +114,24 @@ Not written. It is a document rather than code and it is genuinely missing.
 
 ### Not measured
 
-**NFR-PERF-02** (SSO round trip p95 < 800 ms), **NFR-PERF-03** (token endpoint
-p95 < 150 ms), **NFR-PERF-04** (SCIM filter over 10,000 users p95 < 300 ms),
-**NFR-PERF-05** (authorization decision p95 < 50 ms).
+**NFR-PERF-02** (SSO round trip p95 < 800 ms) and **NFR-PERF-04** (SCIM filter
+over 10,000 users p95 < 300 ms) are measured in part and neither figure answers
+its requirement. Both are in the
+[latency budgets report](perf/latency-budgets-2026-09-15.md).
 
-`perf/` has the machinery to measure these and no harness for them. The two SLOs
-that were measured are the two the PRD calls the portfolio — deprovisioning
-latency above all — and these four were not reached before the work stopped.
-NFR-PERF-04 also needs 10,000 seeded users, which is a fixture rather than a run.
+NFR-PERF-02 asks for the round trip excluding upstream think time. Only the
+outbound leg is timed — resolving the IdP, building the `AuthnRequest`, deflating
+and signing it — at 0.329s against a 0.8s budget. The consuming half, the
+fifteen-check gate, is not, because driving it once per sample means completing a
+real login and a login contains the upstream the requirement excludes.
+
+NFR-PERF-04 was measured against a directory holding five people rather than
+10,000. A filter over five rows is an index lookup that never reaches the
+behaviour the requirement is about. Seeding 10,000 through SCIM takes roughly
+half an hour at the measured provisioning latency and was not done.
+
+**NFR-PERF-03** (token endpoint, 0.035s against 0.15s) and **NFR-PERF-05**
+(authorization decision, 6 microseconds against 50 ms) are measured and met.
 
 **NFR-PROV-03** (100 provisioning events a minute for ten minutes, no loss, no
 dead-letter growth). A soak rather than a latency measurement. See
@@ -165,16 +177,14 @@ NFR-AVAIL-05
 NFR-OBS-02
 NFR-OBS-04
 NFR-PERF-02
-NFR-PERF-03
 NFR-PERF-04
-NFR-PERF-05
 NFR-PROV-03
 NFR-SEC-04
 NFR-UX-01
 NFR-UX-03
 ```
 
-Fifteen of 148. Every other requirement is referenced by the work, which is a
+Thirteen of 148. Every other requirement is referenced by the work, which is a
 weaker statement than "met" — see below.
 
 ## Cited but worth re-reading
