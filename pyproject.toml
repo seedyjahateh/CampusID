@@ -69,7 +69,7 @@ known-first-party = ["campusid"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["campusid", "scripts", "tests"]
+files = ["campusid", "perf", "scripts", "tests"]
 strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
