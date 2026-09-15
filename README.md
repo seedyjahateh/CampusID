@@ -9,8 +9,11 @@ OIDC provider, provisions and deprovisions accounts from a mock SIS over SCIM
 RBAC/ABAC with step-up MFA — logging every authentication, authorization, and
 attribute-release decision.
 
-**Status: M1 complete.** A browser picks an institution, signs in against one of
-two real Keycloak IdPs, and lands in a broker session — through a validation
+**Status: M0 to M5 complete**, with thirteen of 148 requirements documented as
+unmet and why — see [docs/STATUS.md](docs/STATUS.md).
+
+A browser picks an institution, signs in against one of two real Keycloak IdPs,
+and lands in a broker session — through a validation
 gate that rejects expired, misaddressed, replayed, wrapped and
 comment-spliced assertions, and decrypts encrypted ones. Full specification:
 [`docs/PRD.md`](docs/PRD.md).
@@ -152,7 +155,7 @@ that reproduces the quickstart on a clean runner.
 | M2 | Attribute release policy, OIDC provider, dual-protocol sample app | ✅ Complete |
 | M3 | SCIM 2.0 provisioning, joiner/mover/leaver lifecycle | ✅ Complete |
 | M4 | LDAP/AD, RBAC/ABAC, TOTP + WebAuthn + step-up MFA, admin API | ✅ Complete |
-| M5 | Audit hash chain, dashboard, hardening, documentation | |
+| M5 | Audit hash chain, dashboard, hardening, documentation | ✅ Complete |
 
 ## Layout
 
@@ -161,7 +164,9 @@ campusid/      broker application (saml/ oidc/ scim/ directory/ policy/ mfa/ aud
 migrations/    Alembic revisions; forward-only, advisory-locked (ADR-002)
 tests/         unit/ (no containers) · integration/ (live stack) · security/ · e2e/
 scripts/       entrypoint.sh · smoke.sh · operator tools (reconcile, prune, verify chain)
-docs/          PRD.md · decisions/ (ADRs) · runbooks/
+perf/          measured latency runs; reports land in docs/perf/
+security/      dependency vulnerability exceptions, with enforced expiry dates
+docs/          PRD.md · STATUS.md · ha-design.md · decisions/ (ADRs) · runbooks/ · perf/
 ```
 
 ## Runbooks
@@ -177,6 +182,13 @@ for whoever wrote the code. Each carries the date somebody last ran the steps.
 | [Compromised account](docs/runbooks/compromised-account.md) | Somebody's credentials are in the wrong hands |
 | [Provisioning backlog](docs/runbooks/provisioning-backlog.md) | Writes to a downstream system are failing or piling up |
 | [Drift remediation](docs/runbooks/drift-remediation.md) | The directory and the broker disagree about who exists |
+
+## Status and design
+
+[docs/STATUS.md](docs/STATUS.md) says which requirements are not met and why —
+thirteen of 148, grouped by reason, with a test that fails if the list falls behind
+the PRD. [docs/ha-design.md](docs/ha-design.md) is what a production deployment
+would have to change, derived from what the code does rather than from a template.
 
 ## Design decisions
 

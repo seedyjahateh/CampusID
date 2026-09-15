@@ -109,8 +109,12 @@ There is no TLS endpoint to scan, so the scan would pass by measuring nothing.
 The application-layer half of the requirement is enforced: HSTS is set on every
 response, and the cookie attributes are asserted exactly.
 
-**NFR-AVAIL-01** asks for a documented HA design for a production deployment.
-Not written. It is a document rather than code and it is genuinely missing.
+**NFR-AVAIL-01** has two halves. The design for a production deployment is now
+written — see [the HA design](ha-design.md), which is derived from what the code
+does rather than from a template, and names the four places this broker is not
+stateless. The other half asks for 99.5% availability measured over the demo
+period, and there is no uptime monitor against a stack that runs on a laptop when
+somebody is working on it. That number would be a fiction, so it is not claimed.
 
 ### Not measured
 
