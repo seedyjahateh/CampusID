@@ -84,6 +84,44 @@ def test_a_person_projects_as_a_scim_user() -> None:
     assert resource["name"]["familyName"] == "O'Brien"
 
 
+def test_a_person_with_no_eppn_at_all_still_has_a_username() -> None:
+    """RFC 7643 §4.1 makes `userName` REQUIRED, so it is never null.
+
+    The state should not arise and it did, in a development database left by an
+    interrupted run: the person had no identifier rows, and the resource went out
+    with `"userName": null`. A conformance client reading a listing gets a type
+    error on a field the specification promises is a string, several layers away
+    from anything that names the cause.
+
+    `edu_person_unique_id` is the floor because it is the broker's own permanent,
+    scoped name for the person and the column cannot be null.
+    """
+    resource = to_scim(_record(identifiers=[]), issuer=ISSUER)
+
+    assert resource["userName"] == "opaque@campus.test"
+
+
+def test_a_released_eppn_is_still_the_username() -> None:
+    """Asserted alongside the floor above so the two cannot be confused.
+
+    A soft-deleted person has every identifier tombstoned, and what they were
+    called is a historical fact. Falling through to the opaque id here would
+    change a deprovisioned person's `userName` the moment they were
+    deprovisioned, which is exactly when an auditor goes looking for it.
+    """
+    record = _record(identifiers=[_identifier("eppn", "gone@campus.test", released=True)])
+
+    assert to_scim(record, issuer=ISSUER)["userName"] == "gone@campus.test"
+
+
+def test_a_person_with_only_an_email_falls_through_to_the_opaque_id() -> None:
+    """The floor is about the absence of an ePPN, not the absence of
+    identifiers: an address is not a `userName` and never substitutes for one."""
+    record = _record(identifiers=[_identifier("mail", "sam@campus.test")])
+
+    assert to_scim(record, issuer=ISSUER)["userName"] == "opaque@campus.test"
+
+
 def test_a_suspended_person_is_inactive() -> None:
     resource = to_scim(_record(status=STATUS_SUSPENDED), issuer=ISSUER)
 

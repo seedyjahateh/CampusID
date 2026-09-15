@@ -79,7 +79,7 @@ def to_scim(record: UserRecord, *, issuer: str) -> dict[str, Any]:
     resource: dict[str, Any] = {
         "schemas": [CORE_USER],
         "id": str(person.person_uuid),
-        "userName": _primary(record.identifiers, ID_EPPN),
+        "userName": _user_name(record),
         "active": person.status == STATUS_ACTIVE,
     }
 
@@ -385,6 +385,31 @@ def _extension(document: dict[str, Any], urn: str) -> dict[str, Any]:
 def _optional_string(container: dict[str, Any], name: str) -> str | None:
     value = container.get(name)
     return value.strip() or None if isinstance(value, str) else None
+
+
+def _user_name(record: UserRecord) -> str:
+    """The `userName`, which RFC 7643 §4.1 makes REQUIRED and never null.
+
+    Normally the ePPN, with the fallbacks `_primary` already makes to a
+    non-primary and then to a released one. What this adds is the floor
+    underneath those: a person carrying no ePPN row at all.
+
+    That should not happen and it did, in a development database left behind by
+    an interrupted run. The resource went out with `"userName": null`, which is
+    schema-invalid — a conformance client reading a listing gets a type error on
+    a field the specification promises is a string, several layers away from
+    anything that would name the cause.
+
+    `edu_person_unique_id` is the right floor because it is this broker's own
+    permanent, scoped name for the person and the column is NOT NULL. It is what
+    the ePPN would have been derived from, so a record falling back to it is
+    unusual rather than wrong, and it stays a valid `userName` in the SCIM sense:
+    unique within the tenant and stable for the life of the person.
+
+    The alternative — omitting the person from listings — is worse. A person the
+    API cannot show is a person nobody can deprovision through it.
+    """
+    return _primary(record.identifiers, ID_EPPN) or record.person.edu_person_unique_id
 
 
 def _primary(identifiers: list[Identifier], id_type: str) -> str | None:
