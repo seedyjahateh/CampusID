@@ -35,6 +35,7 @@ would have been caught by a citation scan. Treat the table below as a floor.
 | Provisioning latency p95 | 0.221s against a 30s target ([report](perf/provisioning-latency-2026-09-15.md)) |
 | Deprovisioning latency p95 | 0.266s against a 15s target ([report](perf/deprovisioning-latency-2026-09-15.md)) |
 | Dependency audit | no known vulnerabilities, hash-pinned |
+| Trace of one login | 7 connected spans against a 5-span requirement |
 | Token endpoint p95 | 0.035s against a 0.15s target ([report](perf/latency-budgets-2026-09-15.md)) |
 | Authorization decision p95 | 6 microseconds against a 50ms target |
 
@@ -145,12 +146,6 @@ dead-letter growth). A soak rather than a latency measurement. See
 events). The index the requirement names exists and is exercised; the five
 million rows are not. Seeding them is a machine-hours exercise and was not run.
 
-### Not implemented
-
-**NFR-OBS-02** asks for OpenTelemetry traces spanning broker, directory and
-downstream calls. Structured JSON logging with a correlation id on every event is
-built and is most of what a trace is for here; distributed tracing is not.
-
 ---
 
 ## Gaps inside things that are built
@@ -178,7 +173,6 @@ FR-FED-06
 FR-FED-07
 NFR-AVAIL-01
 NFR-AVAIL-05
-NFR-OBS-02
 NFR-OBS-04
 NFR-PERF-02
 NFR-PERF-04
@@ -188,7 +182,7 @@ NFR-UX-01
 NFR-UX-03
 ```
 
-Thirteen of 148. Every other requirement is referenced by the work, which is a
+Twelve of 148. Every other requirement is referenced by the work, which is a
 weaker statement than "met" — see below.
 
 ## Cited but worth re-reading

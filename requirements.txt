@@ -61,6 +61,18 @@ argon2-cffi==23.1.0
 # not one, so this is the library's job. Pure Python, no native build.
 prometheus-client==0.21.1
 
+# Tracing (NFR-OBS-02). The API and the SDK, and deliberately none of the
+# auto-instrumentation packages: those wrap every database call and every
+# outbound request, which produces a trace nobody reads and a dependency on the
+# internals of three libraries. The spans here are named by hand at the six
+# places a login actually passes through, which is what makes the trace legible.
+#
+# No exporter package either. Without a configured endpoint the SDK is not
+# installed at all and every span is the API's no-op — so a deployment that does
+# not want tracing pays nothing for it.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+
 # --- OIDC and policy (M2) --------------------------------------------------
 # Attribute release policy is declarative YAML (FR-ARP-01). Loaded with
 # `safe_load` only — `yaml.load` constructs arbitrary Python objects, which

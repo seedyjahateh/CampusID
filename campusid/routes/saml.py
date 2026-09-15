@@ -40,6 +40,7 @@ from campusid.identity.assertions import from_saml
 from campusid.identity.registry import STATUS_ACTIVE
 from campusid.identity.release import merge, registry_attributes
 from campusid.logging import get_logger
+from campusid.observability.tracing import span
 from campusid.routes.errors import reject
 from campusid.saml.authn_request import AuthnRequestPolicy, prepare_redirect
 from campusid.saml.gate import AssertionFacts
@@ -208,6 +209,9 @@ async def assertion_consumer_service(
     # path rather than three shapes of it — which is what makes the uniform
     # error response easy to keep uniform.
     try:
+        # No span of its own: the request span the correlation middleware opens
+        # is already this handler's, and a second one wrapping the same work
+        # would add a layer to every trace and tell a reader nothing.
         await assert_request_binding(request, RelayState)
         document = _decode(SAMLResponse)
         facts = await state.gate.validate(document)
@@ -242,7 +246,8 @@ async def assertion_consumer_service(
     # deprovisioning works by person, so an unresolved login would be
     # unreachable by every later lifecycle action.
     try:
-        person_uuid = await _resolve_person(state, facts)
+        with span("identity.resolve"):
+            person_uuid = await _resolve_person(state, facts)
     except BrokerError as exc:
         await state.audit.record(
             EventType.AUTH_FAILURE,
@@ -261,28 +266,33 @@ async def assertion_consumer_service(
     # entitlements we derive replace anything asserted under those names — an
     # upstream that could assert `eduPersonEntitlement` into a session would be
     # able to grant itself anything.
-    attributes = merge(
-        facts.attributes,
-        await registry_attributes(
-            person_uuid,
-            registry=state.identity,
-            lifecycle=state.lifecycle,
+    with span("attributes.merge", **{"saml.asserted_count": len(facts.attributes)}):
+        attributes = merge(
+            facts.attributes,
+            await registry_attributes(
+                person_uuid,
+                registry=state.identity,
+                lifecycle=state.lifecycle,
+                scope=state.settings.scope,
+            ),
             scope=state.settings.scope,
-        ),
-        scope=state.settings.scope,
-    )
+        )
 
-    session = await state.sessions.create(
-        idp_entity_id=facts.issuer,
-        name_id=facts.name_id,
-        name_id_format=facts.name_id_format,
-        auth_time=facts.authn_instant,
-        acr=facts.authn_context,
-        amr=("pwd",),
-        session_index=facts.session_index,
-        attributes=attributes,
-        person_uuid=person_uuid,
-    )
+    # Counts rather than names. A trace leaves this system and is read by people
+    # who were never granted the identity registry, so what an attribute *was*
+    # stays in the audit trail where the access controls are.
+    with span("session.create", **{"identity.attribute_count": len(attributes)}):
+        session = await state.sessions.create(
+            idp_entity_id=facts.issuer,
+            name_id=facts.name_id,
+            name_id_format=facts.name_id_format,
+            auth_time=facts.authn_instant,
+            acr=facts.authn_context,
+            amr=("pwd",),
+            session_index=facts.session_index,
+            attributes=attributes,
+            person_uuid=person_uuid,
+        )
     await state.audit.record(
         EventType.AUTH_SUCCESS,
         Outcome.SUCCESS,

@@ -48,6 +48,7 @@ from typing import Literal, overload
 from lxml import etree
 
 from campusid.errors import ReasonCode, SamlRejected
+from campusid.observability.tracing import span
 from campusid.saml.encryption import decrypt_assertion
 from campusid.saml.namespaces import (
     BEARER_CONFIRMATION_METHOD,
@@ -178,22 +179,32 @@ class AssertionGate:
         """
 
     async def validate(self, document: bytes) -> AssertionFacts:
-        """Run every check in order, or raise `SamlRejected`."""
-        root = parse_saml(document)  # 1. hardened parse
-        assert_no_wrapping(root)  # 2. structural integrity
-        self._check_status(root)  # 3. protocol status
+        """Run every check in order, or raise `SamlRejected`.
+
+        Traced in three spans rather than fifteen (NFR-OBS-02). One per check
+        would be a faithful trace nobody reads; these three are the phases whose
+        cost differs by orders of magnitude — parsing is microseconds, signature
+        verification is an RSA operation, and the stores are network calls.
+        """
+        with span("saml.parse", **{"saml.document_bytes": len(document)}):
+            root = parse_saml(document)  # 1. hardened parse
+            assert_no_wrapping(root)  # 2. structural integrity
+            self._check_status(root)  # 3. protocol status
+
         idp = await self._resolve_issuer(root)  # 4. issuer -> trusted entity
 
-        # 5-7. algorithms, reference binding, signature.
-        assertion = self._verify(root, idp)
+        with span("saml.verify_signature"):
+            # 5-7. algorithms, reference binding, signature.
+            assertion = self._verify(root, idp)
 
-        self._check_destination(root)  # 8. unprotected, defence in depth
-        request = await self._consume_request(root, idp)  # 9. correlation
-        self._check_audience(assertion)  # 10.
-        not_on_or_after = self._check_conditions(assertion)  # 11.
-        self._check_subject_confirmation(assertion, request)  # 12. authoritative
-        authn_instant, authn_context, session_index = self._check_authn_statement(assertion)
-        await self._check_replay(assertion, not_on_or_after)  # 14.
+        with span("saml.check_conditions"):
+            self._check_destination(root)  # 8. unprotected, defence in depth
+            request = await self._consume_request(root, idp)  # 9. correlation
+            self._check_audience(assertion)  # 10.
+            not_on_or_after = self._check_conditions(assertion)  # 11.
+            self._check_subject_confirmation(assertion, request)  # 12. authoritative
+            authn_instant, authn_context, session_index = self._check_authn_statement(assertion)
+            await self._check_replay(assertion, not_on_or_after)  # 14.
 
         return AssertionFacts(
             issuer=idp.entity_id,

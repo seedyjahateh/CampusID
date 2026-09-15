@@ -76,6 +76,10 @@ x-broker-env: &broker-env
   # `tests/security/test_auth_rate_limit.py`, which drives the `Throttle`
   # directly and does not depend on this value. The account bucket is left at the
   # default because nothing in this broker charges it.
+  # Where to send spans (NFR-OBS-02). Empty disables tracing: with no collector
+  # the SDK is never installed and every span is the API's no-op, so a stack that
+  # is not collecting traces pays nothing for the capability.
+  CAMPUSID_TRACING_ENDPOINT: ${CAMPUSID_TRACING_ENDPOINT:-}
   CAMPUSID_AUTH_RATE_PER_ADDRESS: ${CAMPUSID_AUTH_RATE_PER_ADDRESS:-10000}
   TZ: UTC
 

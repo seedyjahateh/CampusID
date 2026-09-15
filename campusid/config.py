@@ -245,6 +245,14 @@ class Settings(BaseSettings):
     (PRD: ``test_skew_config_bounds.py``).
     """
 
+    tracing_endpoint: str = ""
+    """Where to send spans (NFR-OBS-02). Empty disables tracing entirely.
+
+    Empty by default rather than pointing at a plausible localhost collector,
+    because a deployment with no collector should pay nothing — with this unset
+    the tracing SDK is never installed and every span is the API's no-op.
+    """
+
     auth_rate_per_address: int = Field(default=10, ge=1)
     auth_rate_per_account: int = Field(default=5, ge=1)
     auth_rate_window_seconds: int = Field(default=60, ge=1)

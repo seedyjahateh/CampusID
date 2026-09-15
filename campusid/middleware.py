@@ -8,7 +8,9 @@ inherits them by default instead of needing to remember.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from http import HTTPStatus
 
+from opentelemetry.trace import Status, StatusCode
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -16,7 +18,22 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from campusid.audit.log import new_correlation_id, set_correlation_id
+from campusid.observability.tracing import span
 from campusid.saml.parser import MAX_DOCUMENT_BYTES
+
+
+def _route(request: Request) -> str:
+    """The route template, falling back to the raw path.
+
+    A 404 has matched no route, and naming that span by its path would let a
+    scanner create an operation per URL it tried — the same unbounded-cardinality
+    problem the metrics labels are built to avoid, in a system that charges by
+    the span.
+    """
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return str(path) if path else "unmatched"
+
 
 SECURITY_HEADERS: dict[str, str] = {
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
@@ -109,7 +126,33 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         set_correlation_id(reference)
         bind_contextvars(correlation_id=reference)
         try:
-            response = await call_next(request)
+            # The root span for this request (NFR-OBS-02), opened here because
+            # this is the outermost place that knows the request exists. Every
+            # span a handler opens nests inside it, so one request is one trace —
+            # without this each handler-level span became its own root and a
+            # login arrived at the collector as four unrelated traces.
+            #
+            # The route template rather than the path: `/admin/people/{id}` is a
+            # name a viewer can group by, and the concrete path would make every
+            # person their own operation.
+            with span(request.method) as current:
+                response = await call_next(request)
+                # Renamed rather than named, because the route is not matched
+                # until the router runs — which is inside `call_next`. Opening
+                # with the path instead would let a scanner create one operation
+                # per URL it tried, which is the unbounded-cardinality problem
+                # the metric labels are built to avoid, in a system that charges
+                # by the span.
+                current.update_name(f"{request.method} {_route(request)}")
+                current.set_attribute("http.status_code", response.status_code)
+                if response.status_code >= HTTPStatus.BAD_REQUEST:
+                    # A refusal is a handled outcome, not an exception, so
+                    # nothing propagates for the span to record. Without this the
+                    # trace for a rejected login is indistinguishable from the
+                    # trace for a successful one until somebody reads an
+                    # attribute, and the whole point of a viewer is that failures
+                    # are the ones that stand out.
+                    current.set_status(Status(StatusCode.ERROR, f"HTTP {response.status_code}"))
         finally:
             # Cleared even on an exception: contextvars outlive the request in a
             # worker, and a leaked id would silently attribute the next

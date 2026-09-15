@@ -49,6 +49,7 @@ from campusid.middleware import (
 )
 from campusid.observability.metrics import Metrics
 from campusid.observability.middleware import ScimMetricsMiddleware
+from campusid.observability.tracing import configure as configure_tracing
 from campusid.oidc import keys as oidc_keys
 from campusid.oidc.grants import GrantStore
 from campusid.oidc.logout import ClientSessionIndex, LogoutNotifier
@@ -379,6 +380,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     settings = settings or get_settings()
     configure_logging(settings)
+    # Before the application exists, so a span opened during startup has a
+    # provider to go to. Reports whether it did anything, because an operator who
+    # set an endpoint and sees no traces should be able to tell "not configured"
+    # from "configured and nothing arrived".
+    if configure_tracing(settings.tracing_endpoint):
+        log.info("tracing.enabled", endpoint=settings.tracing_endpoint)
 
     app = FastAPI(
         title="CampusID Broker",
