@@ -1,0 +1,33 @@
+# Vulnerability exceptions (NFR-SEC-08).
+#
+# The requirement says CI fails on a known vulnerability "without a documented,
+# dated exception". This file is where that exception goes, and the dating is
+# enforced rather than decorative: `scripts/audit_dependencies.py` refuses to run
+# past `review_by`, so an exception that nobody revisits becomes a build failure
+# instead of a permanent silence. That is the entire point of the mechanism.
+#
+# An entry is a decision somebody made and can defend, so each carries:
+#
+#   id:         the advisory identifier pip-audit reports (GHSA-… or PYSEC-…).
+#   package:    which dependency, so a reader does not have to look it up.
+#   opened:     when the exception was taken. YYYY-MM-DD.
+#   review_by:  when it stops working. Ninety days is the usual choice; a longer
+#               one needs a reason in the note.
+#   reason:     why this is acceptable *here*. "Not exploitable in our usage"
+#               with no argument is not a reason — say which code path would have
+#               to exist and does not, or name the upgrade this is waiting on.
+#
+# Example of the shape, kept as a comment rather than as data so the list below
+# stays honestly empty:
+#
+#   - id: GHSA-xxxx-xxxx-xxxx
+#     package: some-library
+#     opened: 2026-09-11
+#     review_by: 2026-12-10
+#     reason: >-
+#       The advisory is in the YAML loader path. This project never calls it;
+#       every read goes through safe_load. Waiting on 2.1.0, which drops the
+#       module entirely.
+#
+# Empty is the correct state and the one to return to.
+exceptions: []

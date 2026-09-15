@@ -25,8 +25,8 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock
+      - run: pip install --require-hashes -r requirements-dev.lock
       - name: ruff check
         run: ruff check --output-format=github .
       - name: ruff format
@@ -43,8 +43,8 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock
+      - run: pip install --require-hashes -r requirements-dev.lock
       # tests/security runs here, not in the container job: the validation gate
       # is built against injectable stores precisely so the negative suite needs
       # no Postgres, no Redis and no IdP. If these ever start needing a
@@ -72,6 +72,63 @@ jobs:
             reports/
             coverage.xml
           if-no-files-found: ignore
+
+  dependencies:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # By hash, like the image. A scanner installed loosely is a scanner whose
+      # verdict can change between two runs of the same commit, which is the one
+      # property a merge gate cannot have.
+      - name: Install the audit toolchain
+        run: pip install --require-hashes -r requirements-dev.lock
+
+      # Against the committed locks rather than the installed environment: a
+      # cached runner holds whatever it held last time, which is not what the
+      # next build will install.
+      - name: Audit the locks (NFR-SEC-08)
+        run: python scripts/audit_dependencies.py requirements.lock requirements-dev.lock
+
+      # A lock that no longer matches its source is a lock that is not being
+      # installed from. Regenerating and diffing is the only way to know, because
+      # the failure is silent in both directions.
+      - name: The locks match the requirements they came from
+        run: |
+          ./scripts/lock-dependencies.sh
+          git diff --exit-code -- requirements.lock requirements-dev.lock \
+            || { echo "Lock files are stale. Run ./scripts/lock-dependencies.sh" >&2; exit 1; }
+
+  image-scan:
+    name: Image vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the runtime image
+        run: docker build --target runtime -t campusid/broker:scan .
+
+      # The other half of NFR-SEC-08. pip-audit reads the Python locks; this
+      # reads the Debian packages underneath them, which the locks say nothing
+      # about and which is where a base image goes stale.
+      #
+      # `ignore-unfixed` because an advisory with no released fix is not
+      # actionable here except by changing base image, and a gate that is
+      # permanently red is a gate somebody switches off. The pinned base image
+      # being refreshed is what covers that class; this covers the rest.
+      - name: Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: campusid/broker:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: "1"
+          format: table
 
   secrets-scan:
     name: Secret scan
@@ -126,10 +183,17 @@ jobs:
             exit 1
           fi
 
+      # Everything that needs only the base stack. The `federation` and
+      # `directory` markers are deselected because this job starts neither
+      # Keycloak nor OpenLDAP — they have jobs of their own that do, which is the
+      # whole reason the markers exist. Without this the suite runs tests whose
+      # dependencies are absent and they fail on DNS, which reads as a broken
+      # broker rather than as a missing service.
       - name: Integration tests
         run: |
           docker compose -f docker-compose.yml -f docker-compose.ci.yml \
-            run --rm --build tests
+            run --rm --build tests tests/integration -v \
+            -m "not federation and not directory"
 
       - name: Dump logs on failure
         if: failure()

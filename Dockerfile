@@ -18,13 +18,23 @@ WORKDIR /app
 # --- Dependency layer -------------------------------------------------------
 # Copied separately so a source change does not invalidate the wheel cache.
 FROM base AS deps
-COPY requirements.txt requirements-dev.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock requirements-dev.lock ./
+# --require-hashes (NFR-SEC-08). Every direct and transitive dependency is
+# fetched by digest, so a compromised index, a re-uploaded artifact or a
+# dependency-confusion package is a build failure rather than a running process.
+# It also makes pip refuse any requirement that is not fully pinned, which is
+# what keeps a hand-edited lock from quietly reopening the hole.
+#
+# The lock files, not requirements.txt: pip cannot mix hashed and unhashed
+# requirements, and requirements.txt is the human document that says *why* each
+# direct dependency is here. `scripts/lock-dependencies.sh` turns one into the
+# other.
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 
 # --- Development / CI image (adds the test toolchain) -----------------------
 FROM deps AS dev
-RUN pip install --no-cache-dir -r requirements-dev.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements-dev.lock
 COPY . .
 RUN chmod +x /app/scripts/entrypoint.sh \
     && useradd --uid 10001 --no-create-home --no-user-group --gid users campusid \
@@ -66,7 +76,12 @@ USER campusid
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
+# The timeout is 6s rather than 3s because most of the budget is spent starting
+# a Python interpreter rather than answering the request: on a loaded host the
+# probe was timing out while `/healthz` was replying in milliseconds, which reads
+# as an unhealthy broker and is really a slow `python -c`. Detection is still
+# fast — five failures at a ten-second interval.
+HEALTHCHECK --interval=10s --timeout=6s --start-period=20s --retries=5 \
     CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status==200 else 1)"]
 
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
