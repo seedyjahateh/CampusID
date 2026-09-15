@@ -99,11 +99,34 @@ samples is the second-worst observation rather than a property of the system.
 Where the p99 and the maximum disagree by much, the maximum is the number to ask
 about.
 
-## Not run
+## The soak, and why there is no report for it
 
-**NFR-PROV-03** — 100 events/minute for ten minutes with no dead-letter growth —
-has no harness here. It is a soak rather than a latency measurement, it needs a
-host that will not be doing anything else for ten minutes, and the figures above
-suggest the interesting number is throughput under concurrency rather than the
-sequential latency these runs measure. That is a real gap and it is stated rather
-than implied.
+```sh
+docker compose run --rm --entrypoint python tests -m perf.provisioning_soak
+```
+
+`perf/provisioning_soak.py` implements NFR-PROV-03 — a hundred creates a minute
+for ten minutes, checking that nothing is lost and that dead-letter depth does
+not grow. **It has never run to completion, so there is no report and no claim
+that it passes.**
+
+Two attempts were killed by the host part way through, both for memory pressure
+from work outside this project. The second was tried with Keycloak and OpenLDAP
+stopped, which freed about half a gigabyte and was not enough. Ten minutes of
+steady load is a long time to hold a machine that somebody else is also using.
+
+The harness is committed because it is the artefact the requirement names and
+because it is lint- and type-clean; it is not committed as evidence of anything.
+Run it on a machine with headroom and the report will appear in `docs/perf/`
+alongside the others.
+
+**If a run is interrupted, check for an orphan.** Killing the command does not
+stop the container: `docker compose run` leaves it executing, and the first
+attempt here went on creating people for several minutes after the terminal had
+given up on it. `docker ps` will show it; remove it, then purge as above.
+
+What the soak measures that the latency runs cannot is accumulation. Those send
+one request, wait for it, and send the next, so a connection that is never
+returned to the pool or a retry that files a second dead letter instead of
+extending the first has nowhere to become visible. A leak is a slope, and a slope
+needs a baseline long enough to have one.

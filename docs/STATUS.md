@@ -139,7 +139,11 @@ half an hour at the measured provisioning latency and was not done.
 (authorization decision, 6 microseconds against 50 ms) are measured and met.
 
 **NFR-PROV-03** (100 provisioning events a minute for ten minutes, no loss, no
-dead-letter growth). A soak rather than a latency measurement. See
+dead-letter growth). The harness exists — `perf/provisioning_soak.py` — and has
+never run to completion. Two attempts were killed part way by host memory
+pressure from work outside this project, the second with Keycloak and OpenLDAP
+stopped to free half a gigabyte. Blocked by the machine rather than by the code,
+which is a different thing from unwritten and is recorded as such. See
 [`perf/README.md`](../perf/README.md).
 
 **NFR-OBS-04** (audit query for one subject over 90 days under 2 s at 5 million
